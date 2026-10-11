@@ -1,7 +1,7 @@
 name: pixel_studio
-description: Simple layered photo editor
+description: PS Touch style layered photo editor
 publish_to: none
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -12,6 +12,7 @@ dependencies:
   provider: ^6.1.2
   image_picker: ^1.1.2
   gal: ^2.3.0
+  path_provider: ^2.1.4
 
 flutter:
   uses-material-design: true
