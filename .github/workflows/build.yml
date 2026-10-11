@@ -40,4 +40,4 @@ jobs:
         with:
           name: PixelStudio-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-      
+          
