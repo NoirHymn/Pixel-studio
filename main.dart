@@ -16,20 +16,137 @@ import 'package:provider/provider.dart';
 // ============================================================
 // Theme
 // ============================================================
-const kBarTop = Color(0xFF2A2A2A);
-const kBarBottom = Color(0xFF1B1B1B);
-const kPanel = Color(0xFF2F2F2F);
-const kCanvasBg = Color(0xFF8A8A8A);
-const kMenuBg = Color(0xFF272727);
-const kBlue = Color(0xFF1B8FE8);
+// ============================================================
+// Palette (theme aware, set from AppTheme)
+// ============================================================
+class Pal {
+  static bool dark = true;
+  static Color accent = const Color(0xFF4F8CFF);
+  static Color get onAccent =>
+      accent.computeLuminance() > 0.45 ? const Color(0xFF0B0D14) : Colors.white;
+  static Color get bg => dark ? const Color(0xFF0F1115) : const Color(0xFFEEF0F5);
+  static Color get surface => dark ? const Color(0xFF1B1E25) : Colors.white;
+  static Color get surface2 => dark ? const Color(0xFF242830) : const Color(0xFFF1F2F7);
+  static Color get line => dark ? const Color(0x17FFFFFF) : const Color(0x1C141828);
+  static Color get txt => dark ? const Color(0xFFE9EBF1) : const Color(0xFF161A2B);
+  static Color get mut => dark ? const Color(0xFF9BA2B1) : const Color(0xFF596079);
+  static Color get dim => dark ? const Color(0xFF626978) : const Color(0xFF9096AB);
+  static Color get fill => dark ? const Color(0x0DFFFFFF) : const Color(0x0F141828);
+  static Color get stageBg => dark ? const Color(0xFF14161C) : const Color(0xFFE3E6EE);
+  static Color tint(double a) => accent.withValues(alpha: a);
+}
+
+Color get kBarTop => Pal.surface;
+Color get kBarBottom => Pal.surface;
+Color get kPanel => Pal.surface;
+Color get kCanvasBg => Pal.stageBg;
+Color get kMenuBg => Pal.surface;
+Color get kBlue => Pal.accent;
 const comingSoon = 'coming in the next batch';
 
-TextStyle lbl(double size, {Color color = Colors.white}) => TextStyle(
-      fontFamily: 'serif',
-      fontWeight: FontWeight.bold,
+TextStyle lbl(double size, {Color? color}) => TextStyle(
+      fontWeight: FontWeight.w600,
       fontSize: size < 11 ? 11 : size,
-      color: color,
+      color: color ?? Pal.txt,
     );
+
+BoxDecoration surfaceDeco({double radius = 22, Color? color}) => BoxDecoration(
+      color: color ?? Pal.surface,
+      borderRadius: BorderRadius.circular(radius),
+      border: Border.all(color: Pal.line),
+      boxShadow: const [
+        BoxShadow(color: Color(0x40000000), blurRadius: 18, offset: Offset(0, 6)),
+      ],
+    );
+
+class AppTheme extends ChangeNotifier {
+  bool dark = true;
+  Color accent = const Color(0xFF4F8CFF);
+  bool haptics = true;
+
+  static const accents = [
+    Color(0xFF4F8CFF),
+    Color(0xFF2ECC71),
+    Color(0xFFFF7A2F),
+    Color(0xFFA56BFF),
+    Color(0xFFFF4F7B),
+    Color(0xFF14C5C5),
+  ];
+
+  Future<File> _file() async {
+    final d = await getApplicationDocumentsDirectory();
+    return File('${d.path}/settings.json');
+  }
+
+  Future<void> load() async {
+    try {
+      final f = await _file();
+      if (await f.exists()) {
+        final m = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+        dark = (m['dark'] as bool?) ?? true;
+        accent = Color((m['accent'] as int?) ?? accent.toARGB32());
+        haptics = (m['haptics'] as bool?) ?? true;
+      }
+    } catch (_) {}
+    _apply();
+  }
+
+  void _apply() {
+    Pal.dark = dark;
+    Pal.accent = accent;
+    gHaptics = haptics;
+  }
+
+  Future<void> _save() async {
+    try {
+      final f = await _file();
+      await f.writeAsString(
+          jsonEncode({'dark': dark, 'accent': accent.toARGB32(), 'haptics': haptics}));
+    } catch (_) {}
+  }
+
+  void update({bool? dark, Color? accent, bool? haptics}) {
+    if (dark != null) this.dark = dark;
+    if (accent != null) this.accent = accent;
+    if (haptics != null) this.haptics = haptics;
+    _apply();
+    _save();
+    notifyListeners();
+  }
+}
+
+ThemeData buildTheme() {
+  final scheme = ColorScheme.fromSeed(
+    seedColor: Pal.accent,
+    brightness: Pal.dark ? Brightness.dark : Brightness.light,
+  ).copyWith(primary: Pal.accent, onPrimary: Pal.onAccent, surface: Pal.surface);
+  return ThemeData(
+    useMaterial3: true,
+    colorScheme: scheme,
+    scaffoldBackgroundColor: Pal.bg,
+    sliderTheme: SliderThemeData(
+      activeTrackColor: Pal.accent,
+      thumbColor: Pal.accent,
+      inactiveTrackColor: Pal.line,
+      overlayColor: Pal.tint(0.15),
+    ),
+    bottomSheetTheme: BottomSheetThemeData(
+      backgroundColor: Pal.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
+      ),
+    ),
+    snackBarTheme: SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: Pal.dark ? const Color(0xFFE9EBF1) : const Color(0xFF1B1E25),
+      contentTextStyle: TextStyle(
+        color: Pal.dark ? const Color(0xFF0F1115) : Colors.white,
+        fontWeight: FontWeight.w500,
+      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    ),
+  );
+}
 
 // ============================================================
 // Image helpers
@@ -469,6 +586,8 @@ class EditorState extends ChangeNotifier {
     selMask = s.mask;
     selEdge = s.edge;
     selEdge2 = s.edge;
+    selEdges = [];
+    if (selMask != null) _rebuildEdges();
     stroke = [];
     poly = [];
     xfActive = false;
@@ -1333,32 +1452,11 @@ class EditorState extends ChangeNotifier {
     await _setSelection(result);
   }
 
-  Future<void> _setSelection(ui.Image mask, {bool push = true}) async {
+  Future<List<ui.Image>> _buildEdges(Uint8List sel) async {
     final w = docW;
     final h = docH;
     final n = w * h;
-    final bd = await mask.toByteData(format: ui.ImageByteFormat.rawRgba);
-    if (bd == null) return;
-    final b = bd.buffer.asUint8List();
-    final sel = Uint8List(n);
-    bool any = false;
-    for (int i = 0; i < n; i++) {
-      if (b[i * 4 + 3] > 127) {
-        sel[i] = 1;
-        any = true;
-      }
-    }
-    if (!any) {
-      if (selMask != null) {
-        if (push) _pushUndo();
-        selMask = null;
-        selEdge = null;
-        notifyListeners();
-      }
-      return;
-    }
-    final px = Uint8List(n * 4);
-    final px2 = Uint8List(n * 4);
+    final idx = <int>[];
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
         final i = y * w + x;
@@ -1375,27 +1473,74 @@ class EditorState extends ChangeNotifier {
         } else if (s == 1 && (x == 0 || y == 0 || x == w - 1 || y == h - 1)) {
           e = true;
         }
-        if (e) {
-          final v = (((x + y) >> 2) & 1) == 0 ? 0 : 255;
-          final j = i * 4;
-          px[j] = v;
-          px[j + 1] = v;
-          px[j + 2] = v;
-          px[j + 3] = 255;
-          final v2 = 255 - v;
-          px2[j] = v2;
-          px2[j + 1] = v2;
-          px2[j + 2] = v2;
-          px2[j + 3] = 255;
-        }
+        if (e) idx.add(i);
       }
     }
-    final edge = await imageFromRgba(px, w, h);
-    final edge2 = await imageFromRgba(px2, w, h);
+    final out = <ui.Image>[];
+    for (int ph = 0; ph < 4; ph++) {
+      final px = Uint8List(n * 4);
+      for (final i in idx) {
+        final x = i % w;
+        final y = i ~/ w;
+        final v = ((((x + y) + ph * 2) >> 2) & 1) == 0 ? 0 : 255;
+        final j = i * 4;
+        px[j] = v;
+        px[j + 1] = v;
+        px[j + 2] = v;
+        px[j + 3] = 255;
+      }
+      out.add(await imageFromRgba(px, w, h));
+    }
+    return out;
+  }
+
+  Future<Uint8List?> _selFlags(ui.Image mask) async {
+    final bd = await mask.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (bd == null) return null;
+    final b = bd.buffer.asUint8List();
+    final n = docW * docH;
+    final sel = Uint8List(n);
+    bool any = false;
+    for (int i = 0; i < n; i++) {
+      if (b[i * 4 + 3] > 127) {
+        sel[i] = 1;
+        any = true;
+      }
+    }
+    return any ? sel : null;
+  }
+
+  Future<void> _rebuildEdges() async {
+    final m = selMask;
+    if (m == null) return;
+    final sel = await _selFlags(m);
+    if (sel == null) return;
+    final edges = await _buildEdges(sel);
+    if (!identical(selMask, m)) return;
+    selEdges = edges;
+    selEdge = edges[0];
+    _startAnts();
+    notifyListeners();
+  }
+
+  Future<void> _setSelection(ui.Image mask, {bool push = true}) async {
+    final sel = await _selFlags(mask);
+    if (sel == null) {
+      if (selMask != null) {
+        if (push) _pushUndo();
+        selMask = null;
+        selEdge = null;
+        selEdges = [];
+        notifyListeners();
+      }
+      return;
+    }
+    final edges = await _buildEdges(sel);
     if (push) _pushUndo();
     selMask = mask;
-    selEdge = edge;
-    selEdge2 = edge2;
+    selEdge = edges[0];
+    selEdge2 = edges[2];
+    selEdges = edges;
     _startAnts();
     notifyListeners();
   }
@@ -1642,12 +1787,13 @@ class EditorState extends ChangeNotifier {
   final ValueNotifier<int> antTick = ValueNotifier<int>(0);
   Timer? _antTimer;
   ui.Image? selEdge2;
+  List<ui.Image> selEdges = [];
   bool showZoom = false;
   Timer? _zoomTimer;
 
   void _startAnts() {
     _antTimer?.cancel();
-    _antTimer = Timer.periodic(const Duration(milliseconds: 380), (t) {
+    _antTimer = Timer.periodic(const Duration(milliseconds: 110), (t) {
       if (selEdge == null) {
         t.cancel();
         return;
@@ -2260,20 +2406,47 @@ class EditorState extends ChangeNotifier {
   // ======================================================
   // Batch 3: pixel effects, curves, warp, refine edge ...
   // ======================================================
-  bool showPointer = false;
-  Offset? pointerDoc;
+  // ---------- pointer mode (pad + click button) ----------
+  bool ptrMode = false;
+  Offset ptr = const Offset(540, 600);
+  bool _ptrDown = false;
+  Offset _ptrStart = Offset.zero;
 
   void togglePointer() {
-    showPointer = !showPointer;
-    toast(showPointer ? 'Pointer on: touch is offset above your finger' : 'Pointer off');
+    ptrMode = !ptrMode;
+    if (ptrMode) {
+      final c = toDoc(Offset(viewport.width / 2, viewport.height / 2));
+      ptr = Offset(math.max(0.0, math.min(docW.toDouble(), c.dx)),
+          math.max(0.0, math.min(docH.toDouble(), c.dy)));
+      toast('Pointer on: drag the pad to move, hold the button to act');
+    } else {
+      _ptrDown = false;
+    }
     notifyListeners();
   }
 
-  Offset toDocP(Offset p) {
-    final q = showPointer ? p + const Offset(0, -110) : p;
-    final d = toDoc(q);
-    if (showPointer) pointerDoc = d;
-    return d;
+  void ptrMove(Offset screenDelta) {
+    ptr = Offset(
+      math.max(0.0, math.min(docW.toDouble(), ptr.dx + screenDelta.dx / scale * 1.15)),
+      math.max(0.0, math.min(docH.toDouble(), ptr.dy + screenDelta.dy / scale * 1.15)),
+    );
+    if (_ptrDown) gestureMove(ptr);
+    notifyListeners();
+  }
+
+  void ptrPress() {
+    if (_ptrDown) return;
+    _ptrDown = true;
+    _ptrStart = ptr;
+    gestureDown(ptr);
+    notifyListeners();
+  }
+
+  void ptrRelease() {
+    if (!_ptrDown) return;
+    _ptrDown = false;
+    final moved = (ptr - _ptrStart).distance * scale > 8;
+    gestureUp(ptr, moved);
   }
 
   // ---------- pixel helpers ----------
@@ -3186,11 +3359,32 @@ class EditorState extends ChangeNotifier {
     notifyListeners();
   }
 
+  double fitTop = 90;
+  double fitBottom = 110;
+
+  void setFitInsets(double t, double b) {
+    if ((t - fitTop).abs() < 0.5 && (b - fitBottom).abs() < 0.5) return;
+    fitTop = t;
+    fitBottom = b;
+    if (!_userZoomed) {
+      _fit();
+      notifyListeners();
+    }
+  }
+
+  void panBy(Offset d) {
+    offset = offset + d;
+    _userZoomed = true;
+    notifyListeners();
+  }
+
   void _fit() {
     if (viewport == Size.zero) return;
-    final k = math.min(viewport.width / docW, viewport.height / docH) * 0.96;
+    final availH = math.max(100.0, viewport.height - fitTop - fitBottom);
+    final availW = viewport.width - 24;
+    final k = math.min(availW / docW, availH / docH);
     scale = k;
-    offset = Offset((viewport.width - docW * k) / 2, (viewport.height - docH * k) / 2);
+    offset = Offset((viewport.width - docW * k) / 2, fitTop + (availH - docH * k) / 2);
     _userZoomed = false;
   }
 
@@ -3396,16 +3590,26 @@ class DocPainter extends CustomPainter {
   void _extraOverlays(Canvas canvas) {
     final sc = s.scale;
     final lw = 2 / sc;
-    if (s.showPointer && s.pointerDoc != null) {
-      final p = s.pointerDoc!;
-      final r = 18 / sc;
-      final pp = Paint()
+    if (s.ptrMode) {
+      final p = s.ptr;
+      final r = 20 / sc;
+      final shadow = Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = lw
-        ..color = const Color(0xFFFF4D4D);
-      canvas.drawCircle(p, r, pp);
-      canvas.drawLine(p + Offset(-r * 1.8, 0), p + Offset(r * 1.8, 0), pp);
-      canvas.drawLine(p + Offset(0, -r * 1.8), p + Offset(0, r * 1.8), pp);
+        ..strokeWidth = 4.5 / sc
+        ..strokeCap = StrokeCap.round
+        ..color = const Color(0x99000000);
+      final white = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2 / sc
+        ..strokeCap = StrokeCap.round
+        ..color = Colors.white;
+      for (final pp in [shadow, white]) {
+        canvas.drawLine(p + Offset(-r * 1.6, 0), p + Offset(-r * 0.45, 0), pp);
+        canvas.drawLine(p + Offset(r * 0.45, 0), p + Offset(r * 1.6, 0), pp);
+        canvas.drawLine(p + Offset(0, -r * 1.6), p + Offset(0, -r * 0.45), pp);
+        canvas.drawLine(p + Offset(0, r * 0.45), p + Offset(0, r * 1.6), pp);
+      }
+      canvas.drawCircle(p, 3.4 / sc, Paint()..color = Pal.accent);
     }
     if ((s.tool == Tool.fxBrush || (s.editMask && s.current?.mask != null && s.isPaintTool)) &&
         s.stroke.length > 1) {
@@ -3538,7 +3742,8 @@ class DocPainter extends CustomPainter {
     canvas.drawPath(
         _checkerPath(s.docW, s.docH), Paint()..color = const Color(0xFFD9D9D9));
     s.paintDoc(canvas, preview: true);
-    final edge = (s.antTick.value.isOdd && s.selEdge2 != null) ? s.selEdge2 : s.selEdge;
+    final ei = s.selEdges;
+    final edge = ei.isNotEmpty ? ei[s.antTick.value % ei.length] : s.selEdge;
     if (s.selEdge != null && edge != null) {
       canvas.drawImage(edge, Offset.zero, Paint()..filterQuality = FilterQuality.none);
     }
@@ -3621,7 +3826,7 @@ class _CanvasViewState extends State<CanvasView> {
               _moved = false;
               _multi = false;
               _ignore = s.closeOverlays();
-              if (!_ignore) s.gestureDown(s.toDocP(e.localPosition));
+              if (!_ignore && !s.ptrMode) s.gestureDown(s.toDoc(e.localPosition));
             } else {
               _multi = true;
               s.gestureCancel();
@@ -3634,7 +3839,13 @@ class _CanvasViewState extends State<CanvasView> {
               if (!_moved && _down != null && (e.localPosition - _down!).distance > 10) {
                 _moved = true;
               }
-              if (!_ignore) s.gestureMove(s.toDocP(e.localPosition));
+              if (!_ignore) {
+                if (s.ptrMode) {
+                  s.panBy(e.localPosition - prev);
+                } else {
+                  s.gestureMove(s.toDoc(e.localPosition));
+                }
+              }
               _ptrs[e.pointer] = e.localPosition;
             } else if (_ptrs.length == 2) {
               final other = _ptrs.entries.firstWhere((x) => x.key != e.pointer).value;
@@ -3649,7 +3860,7 @@ class _CanvasViewState extends State<CanvasView> {
           onPointerUp: (e) {
             final wasOne = _ptrs.length == 1 && !_multi && !_ignore;
             _ptrs.remove(e.pointer);
-            if (wasOne) s.gestureUp(s.toDocP(e.localPosition), _moved);
+            if (wasOne && !s.ptrMode) s.gestureUp(s.toDoc(e.localPosition), _moved);
             if (_ptrs.isEmpty) {
               _multi = false;
               _ignore = false;
@@ -3870,28 +4081,126 @@ Future<void> colorSheet(BuildContext ctx, EditorState es) {
 // ============================================================
 // Gallery (home screen)
 // ============================================================
+// ============================================================
+// Gallery (home) - batch 5
+// ============================================================
+class _RoundBtn extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  const _RoundBtn({required this.icon, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Pressable(
+      onTap: onTap,
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: Pal.surface,
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(color: Pal.line),
+        ),
+        child: Icon(icon, size: 21, color: Pal.txt),
+      ),
+    );
+  }
+}
+
+class _FadeIn extends StatelessWidget {
+  final int index;
+  final Widget child;
+  const _FadeIn({required this.index, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: Duration(milliseconds: 320 + math.min(index, 8) * 55),
+      curve: Curves.easeOutCubic,
+      builder: (c, v, ch) => Opacity(
+        opacity: v,
+        child: Transform.translate(offset: Offset(0, (1 - v) * 22), child: ch),
+      ),
+      child: child,
+    );
+  }
+}
+
 Future<void> showSettings(BuildContext ctx) {
+  final t = ctx.read<AppTheme>();
   return showDialog<void>(
     context: ctx,
     builder: (dctx) => StatefulBuilder(
       builder: (dctx, setS) => AlertDialog(
-        backgroundColor: kMenuBg,
-        title: Text('Settings', style: lbl(22)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SwitchListTile(
-              title: Text('Haptic feedback', style: lbl(16)),
-              value: gHaptics,
-              onChanged: (v) => setS(() => gHaptics = v),
-            ),
-            const SizedBox(height: 8),
-            Text('PixelStudio - layered photo editor', style: lbl(13, color: Colors.white54)),
-            Text('Long-press a project to rename, export or delete', style: lbl(13, color: Colors.white54)),
-          ],
+        backgroundColor: Pal.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+        title: Text('Settings', style: lbl(21)),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Theme', style: lbl(13, color: Pal.mut)),
+              const SizedBox(height: 8),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment<bool>(
+                      value: true, label: Text('Dark'), icon: Icon(Icons.dark_mode_outlined)),
+                  ButtonSegment<bool>(
+                      value: false, label: Text('Light'), icon: Icon(Icons.light_mode_outlined)),
+                ],
+                selected: {Pal.dark},
+                onSelectionChanged: (s) {
+                  t.update(dark: s.first);
+                  setS(() {});
+                },
+              ),
+              const SizedBox(height: 18),
+              Text('Accent color', style: lbl(13, color: Pal.mut)),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  for (final c in AppTheme.accents)
+                    GestureDetector(
+                      onTap: () {
+                        buzz();
+                        t.update(accent: c);
+                        setS(() {});
+                      },
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: c,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: Pal.accent.toARGB32() == c.toARGB32() ? Pal.txt : Colors.transparent,
+                            width: 3,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text('Haptic feedback', style: lbl(15)),
+                value: t.haptics,
+                onChanged: (v) {
+                  t.update(haptics: v);
+                  setS(() {});
+                },
+              ),
+            ],
+          ),
         ),
         actions: [
-          FilledButton(onPressed: () => Navigator.pop(dctx), child: const Text('OK')),
+          FilledButton(onPressed: () => Navigator.pop(dctx), child: const Text('Done')),
         ],
       ),
     ),
@@ -3903,12 +4212,12 @@ class GalleryPage extends StatelessWidget {
 
   Future<void> _openEditor(BuildContext context) async {
     await Navigator.of(context).push(PageRouteBuilder<void>(
-      transitionDuration: const Duration(milliseconds: 320),
+      transitionDuration: const Duration(milliseconds: 340),
       pageBuilder: (_, __, ___) => const EditorPage(),
       transitionsBuilder: (_, a, __, child) => FadeTransition(
         opacity: CurvedAnimation(parent: a, curve: Curves.easeOut),
         child: SlideTransition(
-          position: Tween<Offset>(begin: const Offset(0, 0.04), end: Offset.zero)
+          position: Tween<Offset>(begin: const Offset(0, 0.05), end: Offset.zero)
               .animate(CurvedAnimation(parent: a, curve: Curves.easeOutCubic)),
           child: child,
         ),
@@ -3947,19 +4256,20 @@ class GalleryPage extends StatelessWidget {
         final size = await showDialog<List<int>>(
           context: context,
           builder: (ctx) => SimpleDialog(
-            backgroundColor: kMenuBg,
-            title: Text('Blank Document', style: lbl(20)),
+            backgroundColor: Pal.surface,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+            title: Text('Blank document', style: lbl(20)),
             children: [
               for (final o in const [
                 ['1080 x 1080', 1080, 1080],
                 ['1080 x 1350', 1080, 1350],
-                ['1080 x 1920', 1080, 1920],
+                ['1080 x 1920 (9:16)', 1080, 1920],
                 ['1920 x 1080', 1920, 1080],
                 ['2048 x 2048', 2048, 2048],
               ])
                 SimpleDialogOption(
                   onPressed: () => Navigator.pop(ctx, [o[1] as int, o[2] as int]),
-                  child: Text(o[0] as String, style: lbl(18)),
+                  child: Text(o[0] as String, style: lbl(17)),
                 ),
             ],
           ),
@@ -3982,26 +4292,27 @@ class GalleryPage extends StatelessWidget {
     final messenger = ScaffoldMessenger.of(context);
     final act = await showModalBottomSheet<String>(
       context: context,
-      backgroundColor: kMenuBg,
       builder: (c) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            const SizedBox(height: 8),
             ListTile(
-              leading: const Icon(Icons.edit),
-              title: Text('Rename', style: lbl(18)),
+              leading: const Icon(Icons.edit_outlined),
+              title: Text('Rename', style: lbl(16)),
               onTap: () => Navigator.pop(c, 'rename'),
             ),
             ListTile(
               leading: const Icon(Icons.save_alt),
-              title: Text('Export PNG to Photos', style: lbl(18)),
+              title: Text('Export PNG to Photos', style: lbl(16)),
               onTap: () => Navigator.pop(c, 'export'),
             ),
             ListTile(
               leading: const Icon(Icons.delete_outline),
-              title: Text('Delete', style: lbl(18)),
+              title: Text('Delete', style: lbl(16)),
               onTap: () => Navigator.pop(c, 'delete'),
             ),
+            const SizedBox(height: 8),
           ],
         ),
       ),
@@ -4012,12 +4323,14 @@ class GalleryPage extends StatelessWidget {
       final name = await showDialog<String>(
         context: context,
         builder: (ctx) => AlertDialog(
-          backgroundColor: kMenuBg,
+          backgroundColor: Pal.surface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
           title: Text('Rename', style: lbl(20)),
           content: TextField(controller: ctrl, autofocus: true),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()), child: const Text('OK')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, ctrl.text.trim()), child: const Text('OK')),
           ],
         ),
       );
@@ -4035,8 +4348,9 @@ class GalleryPage extends StatelessWidget {
       final ok = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          backgroundColor: kMenuBg,
-          title: Text('Delete "${p.name}"?', style: lbl(20)),
+          backgroundColor: Pal.surface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+          title: Text('Delete "${p.name}"?', style: lbl(19)),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
             FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete')),
@@ -4050,113 +4364,178 @@ class GalleryPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = context.watch<ProjectStore>();
-    final u = MediaQuery.of(context).size.width / 1080;
+    final theme = context.watch<AppTheme>();
     return Scaffold(
-      backgroundColor: const Color(0xFF3A3A3A),
+      backgroundColor: Pal.bg,
       body: SafeArea(
-        child: Column(
+        child: Stack(
           children: [
-            Container(
-              height: 133 * u,
-              padding: EdgeInsets.symmetric(horizontal: 30 * u),
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [Color(0xFF303030), Color(0xFF222222)],
+            Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 26, 16, 6),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'PixelStudio',
+                              style: TextStyle(
+                                fontSize: 32,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: -0.8,
+                                color: Pal.txt,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text('${store.items.length} projects',
+                                style: lbl(13, color: Pal.mut)),
+                          ],
+                        ),
+                      ),
+                      _RoundBtn(icon: Icons.sort, onTap: store.toggleSort),
+                      const SizedBox(width: 8),
+                      _RoundBtn(
+                        icon: Pal.dark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+                        onTap: () => theme.update(dark: !Pal.dark),
+                      ),
+                      const SizedBox(width: 8),
+                      _RoundBtn(icon: Icons.settings_outlined, onTap: () => showSettings(context)),
+                    ],
+                  ),
                 ),
-                border: Border(bottom: BorderSide(color: Colors.black, width: 2)),
-              ),
-              child: Row(
-                children: [
-                  Text('PixelStudio', style: lbl(56 * u)),
-                  const Spacer(),
-                  IconButton(
-                    onPressed: store.toggleSort,
-                    icon: Icon(Icons.sort, color: Colors.white, size: 66 * u),
-                  ),
-                  IconButton(
-                    onPressed: () => showSettings(context),
-                    icon: Icon(Icons.settings, color: Colors.white, size: 66 * u),
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: store.items.isEmpty
-                  ? Center(
-                      child: Text(
-                        store.loaded ? 'Tap the + button to start' : 'Loading...',
-                        style: lbl(40 * u, color: Colors.white70),
-                      ),
-                    )
-                  : GridView.builder(
-                      padding: EdgeInsets.all(40 * u),
-                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 3,
-                        crossAxisSpacing: 48 * u,
-                        mainAxisSpacing: 30 * u,
-                        childAspectRatio: 0.78,
-                      ),
-                      itemCount: store.items.length,
-                      itemBuilder: (c, i) {
-                        final p = store.items[i];
-                        return GestureDetector(
-                          onTap: () => _open(context, p),
-                          onLongPress: () => _projectMenu(context, p),
+                Expanded(
+                  child: store.items.isEmpty
+                      ? Center(
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              Expanded(
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF242424),
-                                    borderRadius: BorderRadius.circular(12 * u),
-                                    border: Border.all(color: const Color(0xFF2A2A2A), width: 3),
-                                  ),
-                                  clipBehavior: Clip.antiAlias,
-                                  child: SizedBox.expand(
-                                    child: Image.file(
-                                      File('${store.rootPath}/${p.id}/thumb.png'),
-                                      fit: BoxFit.cover,
-                                      errorBuilder: (a, b, c) => const SizedBox(),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              SizedBox(height: 14 * u),
+                              Icon(Icons.layers_outlined, size: 54, color: Pal.dim),
+                              const SizedBox(height: 14),
                               Text(
-                                p.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: lbl(40 * u),
+                                store.loaded ? 'No projects yet' : 'Loading...',
+                                style: lbl(17, color: Pal.mut),
                               ),
+                              if (store.loaded)
+                                Text('Tap New project to start',
+                                    style: lbl(13, color: Pal.dim)),
                             ],
                           ),
-                        );
-                      },
-                    ),
+                        )
+                      : GridView.builder(
+                          padding: const EdgeInsets.fromLTRB(20, 16, 20, 120),
+                          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2,
+                            crossAxisSpacing: 16,
+                            mainAxisSpacing: 18,
+                            childAspectRatio: 0.86,
+                          ),
+                          itemCount: store.items.length,
+                          itemBuilder: (c, i) {
+                            final p = store.items[i];
+                            return _FadeIn(
+                              index: i,
+                              child: Pressable(
+                                onTap: () => _open(context, p),
+                                onLongPress: () => _projectMenu(context, p),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          color: Pal.surface,
+                                          borderRadius: BorderRadius.circular(22),
+                                          border: Border.all(color: Pal.line),
+                                        ),
+                                        clipBehavior: Clip.antiAlias,
+                                        child: SizedBox.expand(
+                                          child: Image.file(
+                                            File('${store.rootPath}/${p.id}/thumb.png'),
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (a, b, c) => const SizedBox(),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 9),
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                                      child: Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              p.name,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: lbl(14),
+                                            ),
+                                          ),
+                                          Text('${p.w}x${p.h}', style: lbl(11, color: Pal.dim)),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
             ),
-            Container(
-              height: 157 * u,
-              color: kBarBottom,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  IconButton(
-                    onPressed: () => _newProject(context),
-                    icon: Icon(Icons.add_photo_alternate_outlined, color: Colors.white, size: 96 * u),
-                  ),
-                  SizedBox(width: 120 * u),
-                  IconButton(
-                    onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Long-press a project to rename, export or delete'))),
-                    icon: Icon(Icons.ios_share, color: Colors.white, size: 90 * u),
-                  ),
-                ],
+            Positioned(
+              right: 20,
+              bottom: 20,
+              child: FloatingActionButton.extended(
+                onPressed: () => _newProject(context),
+                backgroundColor: Pal.accent,
+                foregroundColor: Pal.onAccent,
+                icon: const Icon(Icons.add),
+                label: Text('New project', style: lbl(15, color: Pal.onAccent)),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DlgOpt extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+  final bool primary;
+  const _DlgOpt({required this.icon, required this.label, this.onTap, this.primary = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final en = onTap != null;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Opacity(
+        opacity: en ? 1 : 0.35,
+        child: Pressable(
+          onTap: onTap,
+          child: Container(
+            height: 54,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            decoration: BoxDecoration(
+              color: primary ? Pal.accent : Pal.fill,
+              borderRadius: BorderRadius.circular(17),
+              border: Border.all(color: primary ? Colors.transparent : Pal.line),
+            ),
+            child: Row(
+              children: [
+                Icon(icon, size: 22, color: primary ? Pal.onAccent : Pal.accent),
+                const SizedBox(width: 14),
+                Text(label, style: lbl(15.5, color: primary ? Pal.onAccent : Pal.txt)),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -4167,47 +4546,98 @@ class _NewProjectDialog extends StatelessWidget {
   final bool hasClip;
   const _NewProjectDialog({required this.hasClip});
 
-  Widget _btn(BuildContext c, String label, String id, {bool primary = false, bool enabled = true}) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: SizedBox(
-        width: double.infinity,
-        height: 54,
-        child: ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: primary ? kBlue : const Color(0xFF3A3A3A),
-            foregroundColor: Colors.white,
-            disabledForegroundColor: Colors.white30,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          ),
-          onPressed: enabled ? () => Navigator.pop(c, id) : null,
-          child: Text(label, style: lbl(20, color: enabled ? Colors.white : Colors.white30)),
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Dialog(
-      backgroundColor: kMenuBg,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+      backgroundColor: Pal.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('New Project From', style: lbl(24)),
+            Text('New project from', style: lbl(21)),
             const SizedBox(height: 16),
-            _btn(context, 'Photo Library', 'photo', primary: true),
-            _btn(context, 'Camera', 'camera'),
-            _btn(context, 'Blank Document', 'blank'),
-            _btn(context, 'Clipboard', 'clip', enabled: hasClip),
+            _DlgOpt(
+              icon: Icons.photo_library_outlined,
+              label: 'Photo library',
+              primary: true,
+              onTap: () => Navigator.pop(context, 'photo'),
+            ),
+            _DlgOpt(
+                icon: Icons.photo_camera_outlined,
+                label: 'Camera',
+                onTap: () => Navigator.pop(context, 'camera')),
+            _DlgOpt(
+                icon: Icons.crop_portrait_outlined,
+                label: 'Blank document',
+                onTap: () => Navigator.pop(context, 'blank')),
+            _DlgOpt(
+              icon: Icons.content_paste_outlined,
+              label: 'Clipboard',
+              onTap: hasClip ? () => Navigator.pop(context, 'clip') : null,
+            ),
           ],
         ),
       ),
     );
+  }
+}
+
+Future<void> showAddLayerDialog(BuildContext ctx, EditorState es) async {
+  final act = await showDialog<String>(
+    context: ctx,
+    builder: (dctx) => Dialog(
+      backgroundColor: Pal.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Add layer', style: lbl(21)),
+            const SizedBox(height: 16),
+            _DlgOpt(
+                icon: Icons.add_photo_alternate_outlined,
+                label: 'Photo layer',
+                onTap: () => Navigator.pop(dctx, 'photo')),
+            _DlgOpt(
+                icon: Icons.check_box_outline_blank,
+                label: 'Empty layer',
+                onTap: () => Navigator.pop(dctx, 'empty')),
+            _DlgOpt(
+                icon: Icons.copy_all,
+                label: 'Duplicate layer',
+                onTap: () => Navigator.pop(dctx, 'dup')),
+            _DlgOpt(
+              icon: Icons.filter_center_focus,
+              label: 'Layer from selection',
+              onTap: es.hasSel ? () => Navigator.pop(dctx, 'sel') : null,
+            ),
+            const SizedBox(height: 4),
+            _DlgOpt(
+              icon: Icons.check,
+              label: 'Done',
+              primary: true,
+              onTap: () => Navigator.pop(dctx),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+  if (act == null) return;
+  if (act == 'photo') {
+    final b = await pickBytes(ImageSource.gallery);
+    if (b != null) await es.addImageLayer(b);
+  } else if (act == 'empty') {
+    await es.addLayer();
+  } else if (act == 'dup') {
+    es.duplicateLayer();
+  } else if (act == 'sel') {
+    await es.extractToLayer();
   }
 }
 
@@ -4472,6 +4902,31 @@ Future<void> curvesDialog(BuildContext ctx, EditorState es) async {
   if (ok == true) await es.applyCurves(ys);
 }
 
+// ============================================================
+// Editor page - batch 5 (floating UI, menus always on top)
+// ============================================================
+const double kBarH = 58;
+const double kDockH = 78;
+
+class _DotGrid extends CustomPainter {
+  final bool dark;
+  _DotGrid(this.dark);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(Offset.zero & size, Paint()..color = Pal.stageBg);
+    final p = Paint()..color = dark ? const Color(0x12FFFFFF) : const Color(0x1A141828);
+    for (double y = 11; y < size.height; y += 22) {
+      for (double x = 11; x < size.width; x += 22) {
+        canvas.drawCircle(Offset(x, y), 1.1, p);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DotGrid old) => old.dark != dark;
+}
+
 class EditorPage extends StatefulWidget {
   const EditorPage({super.key});
 
@@ -4497,116 +4952,139 @@ class _EditorPageState extends State<EditorPage> {
   @override
   Widget build(BuildContext context) {
     final es = context.watch<EditorState>();
+    context.watch<AppTheme>();
     es.onToast = (m) {
       final ms = ScaffoldMessenger.of(context);
       ms.hideCurrentSnackBar();
       ms.showSnackBar(SnackBar(content: Text(m), duration: const Duration(seconds: 2)));
     };
-    final u = MediaQuery.of(context).size.width / 1080;
+    final mq = MediaQuery.of(context);
+    final topBarTop = mq.padding.top + 10;
+    final topInset = topBarTop + kBarH + 10;
+    final dockBottom = mq.padding.bottom + 10;
+    final bottomInset = dockBottom + kDockH + 12;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) es.setFitInsets(topInset, bottomInset);
+    });
+
     return Scaffold(
-      backgroundColor: Colors.black,
-      body: SafeArea(
-        child: Column(
-          children: [
-            TopBar(u: u),
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Stack(
-                      children: [
-                        Positioned.fill(
-                          child: Container(color: kCanvasBg, child: const CanvasView()),
-                        ),
-                        Positioned(
-                          top: 16 * u,
-                          left: 0,
-                          right: 0,
-                          child: IgnorePointer(
-                            child: AnimatedOpacity(
-                              opacity: es.showZoom ? 1 : 0,
-                              duration: const Duration(milliseconds: 180),
-                              child: Center(
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(horizontal: 30 * u, vertical: 10 * u),
-                                  decoration: BoxDecoration(
-                                    color: Colors.black54,
-                                    borderRadius: BorderRadius.circular(40 * u),
-                                  ),
-                                  child: Text('${(es.scale * 100).round()}%', style: lbl(34 * u)),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        if (es.tool == Tool.polygon && es.poly.length >= 3)
-                          Positioned(
-                            bottom: 24 * u,
-                            left: 0,
-                            right: 0,
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                FloatingActionButton.small(
-                                  heroTag: 'polyOk',
-                                  onPressed: es.finishPolygon,
-                                  child: const Icon(Icons.check),
-                                ),
-                                const SizedBox(width: 20),
-                                FloatingActionButton.small(
-                                  heroTag: 'polyNo',
-                                  onPressed: es.cancelPolygon,
-                                  child: const Icon(Icons.close),
-                                ),
-                              ],
-                            ),
-                          ),
-                        if (es.toolMenuOpen) ToolColumn(u: u),
-                        if (es.menu != null) MenuLayer(u: u, pageContext: context),
-                        if (es.busyMsg != null)
-                          Center(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                              decoration: BoxDecoration(
-                                color: Colors.black87,
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(strokeWidth: 2.5),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Text(es.busyMsg!, style: lbl(16)),
-                                ],
-                              ),
-                            ),
-                          ),
-                      ],
+      backgroundColor: Pal.bg,
+      resizeToAvoidBottomInset: false,
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: RepaintBoundary(
+              child: CustomPaint(painter: _DotGrid(Pal.dark), child: const CanvasView()),
+            ),
+          ),
+          Positioned(
+            top: topInset,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              child: AnimatedOpacity(
+                opacity: es.showZoom ? 1 : 0,
+                duration: const Duration(milliseconds: 180),
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: Pal.surface,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Pal.line),
                     ),
+                    child: Text('${(es.scale * 100).round()}%', style: lbl(12.5)),
                   ),
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 260),
-                    curve: Curves.easeOutCubic,
-                    width: es.layersOpen ? 248 * u : 0,
-                    child: ClipRect(
-                      child: OverflowBox(
-                        alignment: Alignment.centerLeft,
-                        minWidth: 248 * u,
-                        maxWidth: 248 * u,
-                        child: LayersPanel(u: u, pageContext: context),
-                      ),
-                    ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            right: 10,
+            top: topInset - 4,
+            bottom: bottomInset - 8,
+            width: 112,
+            child: IgnorePointer(
+              ignoring: !es.layersOpen,
+              child: AnimatedSlide(
+                offset: es.layersOpen ? Offset.zero : const Offset(1.35, 0),
+                duration: const Duration(milliseconds: 420),
+                curve: Curves.easeOutBack,
+                child: AnimatedOpacity(
+                  opacity: es.layersOpen ? 1 : 0,
+                  duration: const Duration(milliseconds: 220),
+                  child: LayersPanel(pageContext: context),
+                ),
+              ),
+            ),
+          ),
+          if (es.ptrMode) PointerControls(bottom: bottomInset + 4),
+          if (es.tool == Tool.polygon && es.poly.length >= 3)
+            Positioned(
+              bottom: bottomInset + 6,
+              left: 0,
+              right: 0,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  FloatingActionButton.small(
+                    heroTag: 'polyNo',
+                    backgroundColor: Pal.surface,
+                    foregroundColor: Pal.txt,
+                    onPressed: es.cancelPolygon,
+                    child: const Icon(Icons.close),
+                  ),
+                  const SizedBox(width: 16),
+                  FloatingActionButton.small(
+                    heroTag: 'polyOk',
+                    backgroundColor: Pal.accent,
+                    foregroundColor: Pal.onAccent,
+                    onPressed: es.finishPolygon,
+                    child: const Icon(Icons.check),
                   ),
                 ],
               ),
             ),
-            BottomBar(u: u, pageContext: context),
-          ],
-        ),
+          if (es.toolMenuOpen) ToolColumn(bottom: dockBottom + kDockH + 8),
+          Positioned(
+            left: 10,
+            right: 10,
+            bottom: dockBottom,
+            height: kDockH,
+            child: BottomBar(pageContext: context),
+          ),
+          Positioned(
+            left: 10,
+            right: 10,
+            top: topBarTop,
+            height: kBarH,
+            child: const TopBar(),
+          ),
+          if (es.menu != null) MenuLayer(top: topInset - 4, pageContext: context),
+          if (es.busyMsg != null)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                    decoration: surfaceDeco(radius: 18),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2.5, color: Pal.accent),
+                        ),
+                        const SizedBox(width: 14),
+                        Text(es.busyMsg!, style: lbl(15)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -4616,104 +5094,131 @@ class _EditorPageState extends State<EditorPage> {
 // Top bar
 // ============================================================
 class TopBar extends StatelessWidget {
-  final double u;
-  const TopBar({super.key, required this.u});
+  const TopBar({super.key});
 
   @override
   Widget build(BuildContext context) {
     final es = context.watch<EditorState>();
+    context.watch<AppTheme>();
+    const ids = ['sel', 'adj', 'fx', 'amp'];
+    final idx = ids.indexOf(es.menu ?? '');
 
-    Widget item(String id, Widget child) => Expanded(
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () {
-              buzz();
-              es.toggleMenu(id);
-            },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 160),
-              height: double.infinity,
-              color: es.menu == id ? const Color(0xFF161616) : Colors.transparent,
-              alignment: Alignment.center,
-              child: AnimatedScale(
-                scale: es.menu == id ? 1.12 : 1.0,
-                duration: const Duration(milliseconds: 160),
-                child: child,
-              ),
+    Widget item(String id, Widget Function(Color c) icon) {
+      final on = es.menu == id;
+      final c = on ? Pal.accent : Pal.txt;
+      return Expanded(
+        child: Pressable(
+          onTap: () => es.toggleMenu(id),
+          child: Container(
+            height: 44,
+            alignment: Alignment.center,
+            child: AnimatedScale(
+              scale: on ? 1.14 : 1,
+              duration: const Duration(milliseconds: 260),
+              curve: Curves.easeOutBack,
+              child: icon(c),
             ),
           ),
-        );
+        ),
+      );
+    }
 
     return Container(
-      height: 133 * u,
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0xFF303030), Color(0xFF222222)],
-        ),
-        border: Border(bottom: BorderSide(color: Colors.black, width: 2)),
-      ),
-      child: Row(
-        children: [
-          Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16 * u, vertical: 18 * u),
-            child: Pressable(
-              onTap: () async {
-                await es.saveProject();
-                if (context.mounted) Navigator.of(context).pop();
-              },
-              child: Container(
-                width: 170 * u,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E1E1E),
-                  borderRadius: BorderRadius.circular(14 * u),
-                  border: Border.all(color: const Color(0xFF3C3C3C), width: 2),
-                ),
-                child: Text('Done', style: lbl(46 * u)),
-              ),
-            ),
-          ),
-          item('sel', Icon(Icons.highlight_alt, color: Colors.white, size: 76 * u)),
-          item('adj', Icon(Icons.tune, color: Colors.white, size: 76 * u)),
-          item(
-            'fx',
-            Text(
-              'fx',
-              style: TextStyle(
-                fontFamily: 'serif',
-                fontStyle: FontStyle.italic,
-                fontSize: 80 * u,
-                color: Colors.white,
-              ),
-            ),
-          ),
-          item('amp', Text('&', style: lbl(86 * u))),
-          Expanded(
-            child: Pressable(
-              onTap: es.undo,
-              onLongPress: es.redo,
-              child: Container(
-                height: double.infinity,
-                alignment: Alignment.center,
-                child: Icon(
-                  Icons.undo,
-                  color: es.canUndo ? Colors.white : Colors.white24,
-                  size: 76 * u,
+      padding: const EdgeInsets.symmetric(horizontal: 7),
+      decoration: surfaceDeco(radius: 22),
+      child: LayoutBuilder(
+        builder: (c, box) {
+          const doneW = 84.0;
+          final itemW = (box.maxWidth - doneW - 6) / 5;
+          return Stack(
+            alignment: Alignment.centerLeft,
+            children: [
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 340),
+                curve: Curves.easeOutBack,
+                left: doneW + 6 + (idx < 0 ? 0 : idx) * itemW,
+                top: 7,
+                width: itemW,
+                height: 44,
+                child: AnimatedOpacity(
+                  opacity: idx < 0 ? 0 : 1,
+                  duration: const Duration(milliseconds: 200),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Pal.tint(0.16),
+                      borderRadius: BorderRadius.circular(15),
+                      border: Border.all(color: Pal.tint(0.5)),
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ),
-        ],
+              Row(
+                children: [
+                  SizedBox(
+                    width: doneW,
+                    child: Center(
+                      child: Pressable(
+                        onTap: () async {
+                          await es.saveProject();
+                          if (context.mounted) Navigator.of(context).pop();
+                        },
+                        child: Container(
+                          width: 76,
+                          height: 42,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: Pal.accent,
+                            borderRadius: BorderRadius.circular(15),
+                          ),
+                          child: Text('Done', style: lbl(15, color: Pal.onAccent)),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  item('sel', (c) => Icon(Icons.highlight_alt, size: 23, color: c)),
+                  item('adj', (c) => Icon(Icons.tune, size: 23, color: c)),
+                  item(
+                    'fx',
+                    (c) => Text(
+                      'fx',
+                      style: TextStyle(
+                        fontStyle: FontStyle.italic,
+                        fontWeight: FontWeight.w400,
+                        fontSize: 22,
+                        color: c,
+                      ),
+                    ),
+                  ),
+                  item(
+                    'amp',
+                    (c) => Text('&', style: TextStyle(fontSize: 25, fontWeight: FontWeight.w300, color: c)),
+                  ),
+                  Expanded(
+                    child: Pressable(
+                      onTap: es.undo,
+                      onLongPress: es.redo,
+                      child: Container(
+                        height: 44,
+                        alignment: Alignment.center,
+                        child: Icon(
+                          Icons.undo,
+                          size: 23,
+                          color: es.canUndo ? Pal.txt : Pal.dim,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
       ),
     );
   }
 }
 
-// ============================================================
-// Menus (selection / adjustments / fx / &)
-// ============================================================
 class _Item {
   final IconData icon;
   final String label;
@@ -4723,9 +5228,9 @@ class _Item {
 }
 
 class MenuLayer extends StatelessWidget {
-  final double u;
+  final double top;
   final BuildContext pageContext;
-  const MenuLayer({super.key, required this.u, required this.pageContext});
+  const MenuLayer({super.key, required this.top, required this.pageContext});
 
   _Item _pd(EditorState es, IconData i, String l, List<Param> ps,
       Future<void> Function(List<double> v) run) {
@@ -4756,7 +5261,7 @@ class MenuLayer extends StatelessWidget {
         final v = await paramDialog(pc, 'Refine Edge', [const Param('Smooth', 0.5, 20, 3), const Param('Expand / Contract', -10, 10, 0)]);
         if (v != null) await es.refineEdge(v[0], v[1]);
       }),
-      _Item(Icons.near_me, 'Show Pointer', true, es.togglePointer),
+      _Item(Icons.near_me, es.ptrMode ? 'Hide Pointer' : 'Show Pointer', true, es.togglePointer),
       _Item(Icons.filter_center_focus, 'Extract', es.hasSel, es.extractToLayer),
     ];
   }
@@ -4933,30 +5438,49 @@ class MenuLayer extends StatelessWidget {
     ];
   }
 
-  Widget _tile(EditorState es, _Item it) {
-    final c = it.enabled ? Colors.white : const Color(0xFF686868);
-    return InkWell(
-      onTap: it.enabled
-          ? () {
-              buzz();
-              es.closeMenu();
-              it.onTap();
-            }
-          : null,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          it.label == 'Select All'
-              ? toolIcon(Tool.marquee, 84 * u, c)
-              : Icon(it.icon, size: 84 * u, color: c),
-          SizedBox(height: 10 * u),
-          Text(
-            it.label,
-            textAlign: TextAlign.center,
-            maxLines: 2,
-            style: lbl(29 * u, color: c),
+  Widget _tile(EditorState es, _Item it, int idx) {
+    final c = it.enabled ? Pal.txt : Pal.dim;
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: Duration(milliseconds: 260 + math.min(idx, 10) * 28),
+      curve: Curves.easeOutCubic,
+      builder: (c2, v, ch) =>
+          Opacity(opacity: v, child: Transform.scale(scale: 0.9 + 0.1 * v, child: ch)),
+      child: Padding(
+        padding: const EdgeInsets.all(3),
+        child: Pressable(
+          haptic: it.enabled,
+          onTap: it.enabled
+              ? () {
+                  es.closeMenu();
+                  it.onTap();
+                }
+              : null,
+          child: Container(
+            decoration: BoxDecoration(
+              color: Pal.fill,
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                it.label == 'Select All'
+                    ? toolIcon(Tool.marquee, 26, c)
+                    : Icon(it.icon, size: 26, color: c),
+                const SizedBox(height: 8),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(
+                    it.label,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    style: lbl(11.5, color: c),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -4964,6 +5488,7 @@ class MenuLayer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final es = context.watch<EditorState>();
+    context.watch<AppTheme>();
     List<_Item> items;
     Widget? header;
     switch (es.menu) {
@@ -4977,42 +5502,59 @@ class MenuLayer extends StatelessWidget {
         items = _fxItems(es, es.fxTab);
         const tabs = ['Basic', 'Stylize', 'Artistic', 'Photo'];
         header = Container(
-          margin: EdgeInsets.only(bottom: 16 * u),
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(4),
           decoration: BoxDecoration(
-            color: const Color(0xFF1B1B1B),
-            borderRadius: BorderRadius.circular(10 * u),
-            border: Border.all(color: Colors.black, width: 2),
+            color: Pal.fill,
+            borderRadius: BorderRadius.circular(16),
           ),
-          child: Row(
-            children: [
-              for (int i = 0; i < tabs.length; i++)
-                Expanded(
-                  child: GestureDetector(
-                    onTap: () {
-                      buzz();
-                      es.setFxTab(i);
-                    },
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 180),
-                      height: 100 * u,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        gradient: es.fxTab == i
-                            ? const LinearGradient(
-                                begin: Alignment.topCenter,
-                                end: Alignment.bottomCenter,
-                                colors: [Color(0xFF2FA8F5), Color(0xFF0A74CC)],
-                              )
-                            : const LinearGradient(
-                                colors: [Color(0x002FA8F5), Color(0x000A74CC)],
-                              ),
-                        borderRadius: BorderRadius.circular(8 * u),
+          child: LayoutBuilder(
+            builder: (c, box) {
+              final w = box.maxWidth / 4;
+              return SizedBox(
+                height: 38,
+                child: Stack(
+                  children: [
+                    AnimatedPositioned(
+                      duration: const Duration(milliseconds: 340),
+                      curve: Curves.easeOutBack,
+                      left: es.fxTab * w,
+                      top: 0,
+                      bottom: 0,
+                      width: w,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Pal.accent,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
-                      child: Text(tabs[i], style: lbl(40 * u)),
                     ),
-                  ),
+                    Row(
+                      children: [
+                        for (int i = 0; i < tabs.length; i++)
+                          SizedBox(
+                            width: w,
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () {
+                                buzz();
+                                es.setFxTab(i);
+                              },
+                              child: Center(
+                                child: AnimatedDefaultTextStyle(
+                                  duration: const Duration(milliseconds: 200),
+                                  style: lbl(13, color: es.fxTab == i ? Pal.onAccent : Pal.mut),
+                                  child: Text(tabs[i]),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
                 ),
-            ],
+              );
+            },
           ),
         );
         break;
@@ -5021,17 +5563,18 @@ class MenuLayer extends StatelessWidget {
     }
 
     final panel = Material(
-      color: kMenuBg,
-      elevation: 10,
-      borderRadius: BorderRadius.circular(8),
+      color: Pal.surface,
+      elevation: 14,
+      shadowColor: Colors.black87,
+      borderRadius: BorderRadius.circular(26),
       child: Padding(
-        padding: EdgeInsets.all(30 * u),
+        padding: const EdgeInsets.all(12),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             if (header != null) header,
             AnimatedSize(
-              duration: const Duration(milliseconds: 180),
+              duration: const Duration(milliseconds: 200),
               curve: Curves.easeOutCubic,
               alignment: Alignment.topCenter,
               child: AnimatedSwitcher(
@@ -5040,9 +5583,10 @@ class MenuLayer extends StatelessWidget {
                   key: ValueKey('${es.menu}-${es.fxTab}'),
                   crossAxisCount: 3,
                   shrinkWrap: true,
+                  padding: EdgeInsets.zero,
                   physics: const NeverScrollableScrollPhysics(),
-                  childAspectRatio: 1.3,
-                  children: [for (final it in items) _tile(es, it)],
+                  childAspectRatio: 1.25,
+                  children: [for (int i = 0; i < items.length; i++) _tile(es, items[i], i)],
                 ),
               ),
             ),
@@ -5051,38 +5595,44 @@ class MenuLayer extends StatelessWidget {
       ),
     );
 
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: es.closeMenu,
-            child: const SizedBox.expand(),
+    return Positioned.fill(
+      child: Stack(
+        children: [
+          Positioned(
+            left: 0,
+            right: 0,
+            top: top,
+            bottom: 0,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: es.closeMenu,
+              child: const SizedBox.expand(),
+            ),
           ),
-        ),
-        Positioned(
-          top: 10 * u,
-          left: 30 * u,
-          right: 30 * u,
-          child: TweenAnimationBuilder<double>(
-            tween: Tween<double>(begin: 0, end: 1),
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeOutCubic,
-            builder: (c, v, child) => Opacity(
-              opacity: v,
-              child: Transform.translate(
-                offset: Offset(0, (1 - v) * -18),
-                child: Transform.scale(
-                  scale: 0.96 + 0.04 * v,
-                  alignment: Alignment.topCenter,
-                  child: child,
+          Positioned(
+            top: top + 4,
+            left: 10,
+            right: 10,
+            child: TweenAnimationBuilder<double>(
+              tween: Tween<double>(begin: 0, end: 1),
+              duration: const Duration(milliseconds: 260),
+              curve: Curves.easeOutBack,
+              builder: (c, v, child) => Opacity(
+                opacity: math.min(1.0, math.max(0.0, v)),
+                child: Transform.translate(
+                  offset: Offset(0, (1 - v) * -18),
+                  child: Transform.scale(
+                    scale: 0.95 + 0.05 * v,
+                    alignment: Alignment.topCenter,
+                    child: child,
+                  ),
                 ),
               ),
+              child: panel,
             ),
-            child: panel,
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -5090,142 +5640,159 @@ class MenuLayer extends StatelessWidget {
 // ============================================================
 // Tool column (left flyout)
 // ============================================================
-class _CornerTri extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final p = Path()
-      ..moveTo(0, 0)
-      ..lineTo(size.width, 0)
-      ..lineTo(size.width, size.height)
-      ..close();
-    canvas.drawPath(p, Paint()..color = const Color(0xFFB5B5B5));
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter old) => false;
-}
-
+// ============================================================
+// Tool column (left flyout)
+// ============================================================
 class ToolColumn extends StatelessWidget {
-  final double u;
-  const ToolColumn({super.key, required this.u});
+  final double bottom;
+  const ToolColumn({super.key, required this.bottom});
 
   @override
   Widget build(BuildContext context) {
     final es = context.watch<EditorState>();
-    final tw = 225 * u;
-    final th = 157 * u;
+    context.watch<AppTheme>();
+    const tile = 54.0;
+    const gap = 8.0;
+    const pad = 8.0;
     final n = groups.length;
     final g = es.openGroup;
 
     final children = <Widget>[
       Positioned(
-        left: 0,
-        bottom: 0,
+        left: 10,
+        bottom: bottom,
         child: TweenAnimationBuilder<double>(
           tween: Tween<double>(begin: 0, end: 1),
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOutCubic,
-          builder: (c, v, child) => Opacity(
-            opacity: v,
-            child: Transform.translate(offset: Offset(-tw * (1 - v), 0), child: child),
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutBack,
+          builder: (c, v, ch) => Opacity(
+            opacity: math.min(1.0, math.max(0.0, v)),
+            child: Transform.translate(offset: Offset(0, (1 - v) * 24), child: ch),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (int i = 0; i < n; i++)
-                Pressable(
-                  onTap: () => es.tapGroup(i),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 160),
-                    width: tw,
-                    height: th,
-                    decoration: BoxDecoration(
-                      color: g == i ? Colors.white : const Color(0xFF2E2E2E),
-                      border: const Border(
-                          bottom: BorderSide(color: Color(0xFF1A1A1A), width: 2)),
-                    ),
-                    child: Stack(
-                      children: [
-                        Center(
-                          child: toolIcon(
-                            groups[i][es.groupIdx[i]],
-                            84 * u,
-                            g == i ? Colors.black : Colors.white,
-                          ),
-                        ),
-                        if (groups[i].length > 1)
-                          Positioned(
-                            right: 0,
-                            top: 0,
-                            child: CustomPaint(size: Size(30 * u, 30 * u), painter: _CornerTri()),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    ];
-
-    if (g != null) {
-      final bottom = (n - 1 - g) * th;
-      children.add(
-        Positioned(
-          left: tw,
-          bottom: bottom,
-          child: TweenAnimationBuilder<double>(
-            key: ValueKey('row$g'),
-            tween: Tween<double>(begin: 0, end: 1),
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeOutCubic,
-            builder: (c, v, child) => Opacity(
-              opacity: v,
-              child: Transform.translate(offset: Offset(-60 * u * (1 - v), 0), child: child),
-            ),
-            child: Row(
+          child: Container(
+            padding: const EdgeInsets.all(pad),
+            decoration: surfaceDeco(radius: 26),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                for (int j = 0; j < groups[g].length; j++)
-                  Pressable(
-                    onTap: () => es.pickTool(g, j),
-                    child: Container(
-                      width: tw,
-                      height: th,
-                      decoration: BoxDecoration(
-                        color: es.tool == groups[g][j]
-                            ? const Color(0xFF4A4A4A)
-                            : const Color(0xFF303030),
-                        border: const Border(
-                          right: BorderSide(color: Color(0xFF1A1A1A), width: 2),
-                          bottom: BorderSide(color: Color(0xFF1A1A1A), width: 2),
+                for (int i = 0; i < n; i++)
+                  Padding(
+                    padding: EdgeInsets.only(bottom: i == n - 1 ? 0 : gap),
+                    child: Pressable(
+                      onTap: () => es.tapGroup(i),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 240),
+                        curve: Curves.easeOut,
+                        width: tile,
+                        height: tile,
+                        decoration: BoxDecoration(
+                          color: g == i ? Pal.accent : Pal.fill,
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        child: Stack(
+                          children: [
+                            Center(
+                              child: toolIcon(
+                                groups[i][es.groupIdx[i]],
+                                24,
+                                g == i ? Pal.onAccent : Pal.txt,
+                              ),
+                            ),
+                            if (groups[i].length > 1)
+                              Positioned(
+                                right: 7,
+                                top: 7,
+                                child: Container(
+                                  width: 5,
+                                  height: 5,
+                                  decoration: BoxDecoration(
+                                    color: g == i ? Pal.onAccent : Pal.accent,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
-                      child: Center(child: toolIcon(groups[g][j], 84 * u, Colors.white)),
                     ),
                   ),
               ],
             ),
           ),
         ),
+      ),
+    ];
+
+    if (g != null) {
+      final rowBottom = bottom + pad + (n - 1 - g) * (tile + gap);
+      children.add(
+        Positioned(
+          left: 10 + pad + tile + pad + 6,
+          bottom: rowBottom - 5,
+          child: TweenAnimationBuilder<double>(
+            key: ValueKey('row$g'),
+            tween: Tween<double>(begin: 0, end: 1),
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutBack,
+            builder: (c, v, ch) => Opacity(
+              opacity: math.min(1.0, math.max(0.0, v)),
+              child: Transform.translate(offset: Offset(-24 * (1 - v), 0), child: ch),
+            ),
+            child: Container(
+              padding: const EdgeInsets.all(7),
+              decoration: surfaceDeco(radius: 24),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (int j = 0; j < groups[g].length; j++)
+                    Padding(
+                      padding: EdgeInsets.only(right: j == groups[g].length - 1 ? 0 : 6),
+                      child: Pressable(
+                        onTap: () => es.pickTool(g, j),
+                        child: Container(
+                          width: 50,
+                          height: 50,
+                          decoration: BoxDecoration(
+                            color: es.tool == groups[g][j] ? Pal.tint(0.22) : Pal.fill,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: es.tool == groups[g][j] ? Pal.accent : Colors.transparent,
+                              width: 1.5,
+                            ),
+                          ),
+                          child: Center(
+                            child: toolIcon(
+                              groups[g][j],
+                              23,
+                              es.tool == groups[g][j] ? Pal.accent : Pal.txt,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
       );
       children.add(
         Positioned(
-          left: tw + 100 * u,
-          bottom: bottom + th + 14 * u,
+          left: 10 + pad + tile + pad + 10,
+          bottom: rowBottom + tile + 14,
           child: TweenAnimationBuilder<double>(
             key: ValueKey('tip${es.tool.index}'),
             tween: Tween<double>(begin: 0, end: 1),
-            duration: const Duration(milliseconds: 180),
-            builder: (c, v, child) => Opacity(opacity: v, child: child),
+            duration: const Duration(milliseconds: 220),
+            builder: (c, v, ch) => Opacity(opacity: v, child: ch),
             child: Container(
-              padding: EdgeInsets.symmetric(horizontal: 22 * u, vertical: 8 * u),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
               decoration: BoxDecoration(
-                color: const Color(0xFFCFCACA),
-                borderRadius: BorderRadius.circular(8 * u),
-                border: Border.all(color: Colors.black87, width: 2),
+                color: Pal.txt,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: const [BoxShadow(color: Color(0x66000000), blurRadius: 14)],
               ),
-              child: Text(toolName(es.tool), style: lbl(36 * u, color: Colors.black)),
+              child: Text(toolName(es.tool), style: lbl(12.5, color: Pal.bg)),
             ),
           ),
         ),
@@ -5237,17 +5804,133 @@ class ToolColumn extends StatelessWidget {
 }
 
 // ============================================================
-// Bottom bar (tool options)
+// Pointer mode controls (pad + click button)
+// ============================================================
+class PointerControls extends StatefulWidget {
+  final double bottom;
+  const PointerControls({super.key, required this.bottom});
+
+  @override
+  State<PointerControls> createState() => _PointerControlsState();
+}
+
+class _PointerControlsState extends State<PointerControls> {
+  Offset _knob = Offset.zero;
+  bool _drag = false;
+  bool _press = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final es = context.read<EditorState>();
+    return Positioned.fill(
+      child: Stack(
+        children: [
+          Positioned(
+            right: 22,
+            bottom: widget.bottom,
+            child: GestureDetector(
+              onPanStart: (_) => setState(() => _drag = true),
+              onPanUpdate: (d) {
+                es.ptrMove(d.delta);
+                setState(() {
+                  _knob = Offset(
+                    math.max(-14.0, math.min(14.0, _knob.dx + d.delta.dx * 0.7)),
+                    math.max(-14.0, math.min(14.0, _knob.dy + d.delta.dy * 0.7)),
+                  );
+                });
+              },
+              onPanEnd: (_) => setState(() {
+                _drag = false;
+                _knob = Offset.zero;
+              }),
+              onPanCancel: () => setState(() {
+                _drag = false;
+                _knob = Offset.zero;
+              }),
+              child: Container(
+                width: 96,
+                height: 96,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Pal.surface,
+                  border: Border.all(color: Pal.line),
+                  boxShadow: const [
+                    BoxShadow(color: Color(0x59000000), blurRadius: 22, offset: Offset(0, 8)),
+                  ],
+                ),
+                child: Center(
+                  child: AnimatedContainer(
+                    duration: Duration(milliseconds: _drag ? 0 : 320),
+                    curve: Curves.easeOutBack,
+                    transform: Matrix4.translationValues(_knob.dx, _knob.dy, 0),
+                    width: 60,
+                    height: 60,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Pal.accent,
+                      boxShadow: [
+                        BoxShadow(color: Pal.tint(0.45), blurRadius: 16, spreadRadius: 1),
+                      ],
+                    ),
+                    child: Icon(Icons.near_me, size: 28, color: Pal.onAccent),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            left: 22,
+            bottom: widget.bottom + 8,
+            child: Listener(
+              onPointerDown: (_) {
+                buzz();
+                setState(() => _press = true);
+                es.ptrPress();
+              },
+              onPointerUp: (_) {
+                setState(() => _press = false);
+                es.ptrRelease();
+              },
+              onPointerCancel: (_) {
+                setState(() => _press = false);
+                es.ptrRelease();
+              },
+              child: AnimatedScale(
+                scale: _press ? 0.88 : 1,
+                duration: const Duration(milliseconds: 140),
+                curve: Curves.easeOut,
+                child: Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _press ? Pal.tint(0.35) : Pal.surface,
+                    border: Border.all(color: _press ? Pal.accent : Pal.line, width: _press ? 2 : 1),
+                    boxShadow: const [
+                      BoxShadow(color: Color(0x59000000), blurRadius: 22, offset: Offset(0, 8)),
+                    ],
+                  ),
+                  child: Icon(Icons.touch_app, size: 32, color: _press ? Pal.accent : Pal.txt),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// Bottom dock (tool options)
 // ============================================================
 class _Opt extends StatelessWidget {
-  final double u;
   final Widget icon;
   final String label;
   final String? top;
   final bool active;
   final VoidCallback onTap;
   const _Opt({
-    required this.u,
     required this.icon,
     required this.label,
     required this.onTap,
@@ -5257,38 +5940,49 @@ class _Opt extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = active ? const Color(0xFF4DB3FF) : const Color(0xFF9A9A9A);
+    final c = active ? Pal.accent : Pal.mut;
     return Pressable(
       onTap: onTap,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          SizedBox(
-            height: 34 * u,
-            child: top == null ? null : Text(top!, style: lbl(30 * u, color: c)),
-          ),
-          icon,
-          SizedBox(height: 6 * u),
-          Text(label, maxLines: 1, style: lbl(28 * u, color: c)),
-        ],
+      child: Container(
+        color: Colors.transparent,
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(
+              height: 14,
+              child: top == null
+                  ? null
+                  : Text(top!, style: lbl(11, color: active ? Pal.accent : Pal.txt)),
+            ),
+            const SizedBox(height: 2),
+            icon,
+            const SizedBox(height: 3),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w500, color: c),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
 class BottomBar extends StatelessWidget {
-  final double u;
   final BuildContext pageContext;
-  const BottomBar({super.key, required this.u, required this.pageContext});
+  const BottomBar({super.key, required this.pageContext});
 
   Future<void> _modeSheet(EditorState es) {
     return showModalBottomSheet<void>(
       context: pageContext,
-      backgroundColor: kMenuBg,
       builder: (c) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            const SizedBox(height: 8),
             for (final e in const [
               [SelMode.replace, 'New selection'],
               [SelMode.add, 'Add to selection'],
@@ -5296,13 +5990,14 @@ class BottomBar extends StatelessWidget {
               [SelMode.intersect, 'Intersect with selection'],
             ])
               ListTile(
-                title: Text(e[1] as String, style: lbl(18)),
-                trailing: es.selMode == e[0] ? const Icon(Icons.check) : null,
+                title: Text(e[1] as String, style: lbl(16)),
+                trailing: es.selMode == e[0] ? Icon(Icons.check, color: Pal.accent) : null,
                 onTap: () {
                   es.setSelMode(e[0] as SelMode);
                   Navigator.pop(c);
                 },
               ),
+            const SizedBox(height: 8),
           ],
         ),
       ),
@@ -5323,30 +6018,26 @@ class BottomBar extends StatelessWidget {
   }
 
   List<Widget> _options(EditorState es) {
-    final sz = 64 * u;
-    const grey = Color(0xFFBDBDBD);
+    const sz = 22.0;
+    final grey = Pal.mut;
     Widget mode() => _Opt(
-          u: u,
           icon: Icon(_modeIcon(es.selMode), size: sz, color: grey),
           label: 'Mode',
           onTap: () => _modeSheet(es),
         );
     Widget aa() => _Opt(
-          u: u,
           icon: Icon(es.antialias ? Icons.check_box : Icons.check_box_outline_blank,
-              size: sz, color: grey),
+              size: sz, color: es.antialias ? Pal.accent : grey),
           label: 'Antialias',
           onTap: es.toggleAntialias,
         );
     Widget sizeOpt() => _Opt(
-          u: u,
           icon: Icon(Icons.radio_button_checked, size: sz, color: grey),
           label: 'Size',
           top: es.brushSize.round().toString(),
           onTap: () => sliderSheet(pageContext, 'Size', 1, 300, () => es.brushSize, es.setSize),
         );
     Widget opacityOpt() => _Opt(
-          u: u,
           icon: Icon(Icons.opacity, size: sz, color: grey),
           label: 'Opacity',
           top: '${(es.brushOpacity * 100).round()}',
@@ -5354,12 +6045,18 @@ class BottomBar extends StatelessWidget {
               (v) => es.setBrushOpacity(v / 100)),
         );
     Widget hardOpt() => _Opt(
-          u: u,
           icon: Icon(Icons.blur_on, size: sz, color: grey),
           label: 'Hardness',
           top: '${(es.brushHardness * 100).round()}',
           onTap: () => sliderSheet(pageContext, 'Hardness', 0, 100, () => es.brushHardness * 100,
               (v) => es.setHardness(v / 100)),
+        );
+    Widget tolOpt() => _Opt(
+          icon: Icon(Icons.linear_scale, size: sz, color: grey),
+          label: 'Tolerance',
+          top: es.tolerance.round().toString(),
+          onTap: () =>
+              sliderSheet(pageContext, 'Tolerance', 0, 255, () => es.tolerance, es.setTolerance),
         );
 
     switch (es.tool) {
@@ -5370,14 +6067,14 @@ class BottomBar extends StatelessWidget {
         return [
           if (es.tool != Tool.eraser && es.tool != Tool.fxBrush)
             _Opt(
-              u: u,
               icon: Container(
-                width: sz * 0.9,
-                height: sz * 0.9,
+                width: 22,
+                height: 22,
                 decoration: BoxDecoration(
                   color: es.color,
                   shape: BoxShape.circle,
                   border: Border.all(color: Colors.white, width: 2),
+                  boxShadow: const [BoxShadow(color: Color(0x66000000), blurRadius: 6)],
                 ),
               ),
               label: 'Color',
@@ -5390,9 +6087,8 @@ class BottomBar extends StatelessWidget {
       case Tool.stamp:
         return [
           _Opt(
-            u: u,
-            icon: Icon(Icons.my_location, size: sz, color: es.stampSetting ? const Color(0xFF4DB3FF) : grey),
-            label: es.stampSetting ? 'Tap source' : 'Set Source',
+            icon: Icon(Icons.my_location, size: sz, color: es.stampSetting ? Pal.accent : grey),
+            label: es.stampSetting ? 'Tap source' : 'Set source',
             active: es.stampSetting,
             onTap: es.toggleStampSetting,
           ),
@@ -5403,42 +6099,23 @@ class BottomBar extends StatelessWidget {
       case Tool.wand:
         return [
           mode(),
+          tolOpt(),
           _Opt(
-            u: u,
-            icon: Icon(Icons.linear_scale, size: sz, color: grey),
-            label: 'Tolerance',
-            top: es.tolerance.round().toString(),
-            onTap: () =>
-                sliderSheet(pageContext, 'Tolerance', 0, 255, () => es.tolerance, es.setTolerance),
-          ),
-          _Opt(
-            u: u,
             icon: Icon(es.contiguous ? Icons.check_box : Icons.check_box_outline_blank,
-                size: sz, color: grey),
+                size: sz, color: es.contiguous ? Pal.accent : grey),
             label: 'Continuous',
             onTap: es.toggleContiguous,
           ),
         ];
       case Tool.colorSelect:
       case Tool.smartSel:
-        return [
-          mode(),
-          _Opt(
-            u: u,
-            icon: Icon(Icons.linear_scale, size: sz, color: grey),
-            label: 'Tolerance',
-            top: es.tolerance.round().toString(),
-            onTap: () =>
-                sliderSheet(pageContext, 'Tolerance', 0, 255, () => es.tolerance, es.setTolerance),
-          ),
-        ];
+        return [mode(), tolOpt()];
       case Tool.selBrush:
         return [mode(), sizeOpt()];
       case Tool.marquee:
         return [
           mode(),
           _Opt(
-            u: u,
             icon: Icon(Icons.rounded_corner, size: sz, color: grey),
             label: 'Corners',
             top: es.corners.round().toString(),
@@ -5450,20 +6127,22 @@ class BottomBar extends StatelessWidget {
       case Tool.lasso:
       case Tool.polygon:
         return [mode(), aa()];
-      default:
-        return [];
     }
   }
 
-  Widget _sideBtn(Widget child, Color bg, VoidCallback onTap, double w) {
+  Widget _sideBtn(Widget child, VoidCallback onTap, {Color? bg, Color? border}) {
     return Pressable(
       onTap: onTap,
-      child: Container(
-        width: w,
-        height: double.infinity,
-        color: bg,
-        alignment: Alignment.center,
-        child: child,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        width: 56,
+        height: 56,
+        decoration: BoxDecoration(
+          color: bg ?? Pal.fill,
+          borderRadius: BorderRadius.circular(19),
+          border: Border.all(color: border ?? Pal.line),
+        ),
+        child: Center(child: child),
       ),
     );
   }
@@ -5471,30 +6150,22 @@ class BottomBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final es = context.watch<EditorState>();
-    final sz = 64 * u;
-    const grey = Color(0xFFBDBDBD);
+    context.watch<AppTheme>();
+    const sz = 22.0;
+    final grey = Pal.mut;
 
     Widget bar(Widget left, Widget mid, Widget right) => Container(
-          height: 157 * u,
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [Color(0xFF2E2E2E), Color(0xFF1E1E1E)],
-            ),
-            border: Border(top: BorderSide(color: Colors.black, width: 2)),
-          ),
-          child: Row(children: [left, Expanded(child: mid), right]),
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: surfaceDeco(radius: 26),
+          child: Row(children: [left, const SizedBox(width: 4), Expanded(child: mid), const SizedBox(width: 4), right]),
         );
 
     if (es.xfActive) {
       return bar(
-        _sideBtn(Icon(Icons.close, size: 84 * u, color: const Color(0xFFFF6B6B)),
-            const Color(0xFF151515), es.xfCancel, 225 * u),
+        _sideBtn(const Icon(Icons.close, size: 26, color: Color(0xFFFF6B6B)), es.xfCancel),
         Row(children: [
           Expanded(
             child: _Opt(
-              u: u,
               icon: Icon(Icons.flip, size: sz, color: grey),
               label: 'Flip H',
               onTap: es.xfFlipH,
@@ -5502,7 +6173,6 @@ class BottomBar extends StatelessWidget {
           ),
           Expanded(
             child: _Opt(
-              u: u,
               icon: Icon(Icons.swap_vert, size: sz, color: grey),
               label: 'Flip V',
               onTap: es.xfFlipV,
@@ -5510,51 +6180,46 @@ class BottomBar extends StatelessWidget {
           ),
           Expanded(
             child: _Opt(
-              u: u,
               icon: Icon(Icons.rotate_90_degrees_cw, size: sz, color: grey),
               label: 'Rotate 90',
               onTap: es.xfRotate90,
             ),
           ),
         ]),
-        _sideBtn(Icon(Icons.check, size: 90 * u, color: const Color(0xFF5CE08A)),
-            const Color(0xFF151515), es.xfApply, 248 * u),
+        _sideBtn(Icon(Icons.check, size: 28, color: Pal.onAccent), es.xfApply, bg: Pal.accent, border: Colors.transparent),
       );
     }
 
     if (es.cropActive) {
       return bar(
-        _sideBtn(Icon(Icons.close, size: 84 * u, color: const Color(0xFFFF6B6B)),
-            const Color(0xFF151515), es.cropCancel, 225 * u),
-        Center(child: Text('Drag the handles to crop', style: lbl(32 * u, color: const Color(0xFF9A9A9A)))),
-        _sideBtn(Icon(Icons.check, size: 90 * u, color: const Color(0xFF5CE08A)),
-            const Color(0xFF151515), es.cropApply, 248 * u),
+        _sideBtn(const Icon(Icons.close, size: 26, color: Color(0xFFFF6B6B)), es.cropCancel),
+        Center(child: Text('Drag the handles to crop', style: lbl(13.5, color: Pal.mut))),
+        _sideBtn(Icon(Icons.check, size: 28, color: Pal.onAccent), es.cropApply, bg: Pal.accent, border: Colors.transparent),
       );
     }
 
     return bar(
       _sideBtn(
-        toolIcon(es.tool, 84 * u, es.toolMenuOpen ? Colors.white38 : Colors.white),
-        const Color(0xFF151515),
+        toolIcon(es.tool, 26, es.toolMenuOpen ? Pal.accent : Pal.txt),
         es.toggleToolMenu,
-        225 * u,
+        bg: Pal.tint(0.2),
+        border: Pal.tint(es.toolMenuOpen ? 0.9 : 0.5),
       ),
       Row(children: [for (final o in _options(es)) Expanded(child: o)]),
-      _sideBtn(
-        Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Icon(Icons.layers, size: 84 * u, color: es.layersOpen ? const Color(0xFF4DB3FF) : Colors.white),
-            Positioned(
-              right: -10 * u,
-              top: -10 * u,
-              child: Icon(Icons.add, size: 44 * u, color: Colors.white),
-            ),
-          ],
-        ),
-        const Color(0xFF151515),
-        es.toggleLayers,
-        248 * u,
+      Stack(
+        clipBehavior: Clip.none,
+        children: [
+          _sideBtn(
+            Icon(Icons.layers, size: 26, color: es.layersOpen ? Pal.accent : Pal.txt),
+            es.toggleLayers,
+            border: es.layersOpen ? Pal.accent : null,
+          ),
+          Positioned(
+            right: 5,
+            top: 5,
+            child: Icon(Icons.add, size: 14, color: es.layersOpen ? Pal.accent : Pal.txt),
+          ),
+        ],
       ),
     );
   }
@@ -5564,9 +6229,8 @@ class BottomBar extends StatelessWidget {
 // Layers panel (right)
 // ============================================================
 class LayersPanel extends StatelessWidget {
-  final double u;
   final BuildContext pageContext;
-  const LayersPanel({super.key, required this.u, required this.pageContext});
+  const LayersPanel({super.key, required this.pageContext});
 
   Future<void> _layerMenu(EditorState es) async {
     final act = await showModalBottomSheet<String>(
@@ -5689,133 +6353,161 @@ class LayersPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final es = context.watch<EditorState>();
+    context.watch<AppTheme>();
     final n = es.layers.length;
     return Container(
-      width: 248 * u,
-      color: kPanel,
+      decoration: surfaceDeco(radius: 24),
+      clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
           Expanded(
-            child: Align(
-              alignment: Alignment.bottomCenter,
-              child: ReorderableListView.builder(
-                shrinkWrap: true,
-                itemCount: n,
-                onReorder: (oldD, newD) {
-                  if (newD > oldD) newD -= 1;
-                  es.reorder(n - 1 - oldD, n - 1 - newD);
-                },
-                itemBuilder: (c, d) {
-                  final i = n - 1 - d;
-                  final l = es.layers[i];
-                  final sel = i == es.selected;
-                  return GestureDetector(
-                    key: ValueKey(l.id),
-                    onTap: () => es.selectLayer(i),
-                    child: Container(
-                      height: 180 * u,
+            child: ReorderableListView.builder(
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+              itemCount: n,
+              onReorder: (oldD, newD) {
+                if (newD > oldD) newD -= 1;
+                es.reorder(n - 1 - oldD, n - 1 - newD);
+              },
+              itemBuilder: (c, d) {
+                final i = n - 1 - d;
+                final l = es.layers[i];
+                final sel = i == es.selected;
+                return Padding(
+                  key: ValueKey(l.id),
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: GestureDetector(
+                    onTap: () {
+                      buzz();
+                      es.selectLayer(i);
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 240),
+                      curve: Curves.easeOut,
+                      padding: const EdgeInsets.all(5),
                       decoration: BoxDecoration(
-                        gradient: sel
-                            ? const LinearGradient(
-                                begin: Alignment.topCenter,
-                                end: Alignment.bottomCenter,
-                                colors: [Color(0xFF9A9A9A), Color(0xFF5E5E5E)],
-                              )
-                            : null,
+                        color: sel ? Pal.tint(0.16) : Pal.fill,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: sel ? Pal.accent : Colors.transparent,
+                          width: 1.5,
+                        ),
+                        boxShadow: sel
+                            ? [BoxShadow(color: Pal.tint(0.3), blurRadius: 14)]
+                            : const [],
                       ),
-                      child: Stack(
+                      child: Column(
                         children: [
-                          Center(
-                            child: Container(
-                              width: 122 * u,
-                              height: 122 * u,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF6A6A6A),
-                                borderRadius: BorderRadius.circular(8 * u),
-                                border: Border.all(color: Colors.black, width: 2),
-                              ),
-                              clipBehavior: Clip.antiAlias,
-                              child: RawImage(image: l.image, fit: BoxFit.contain),
-                            ),
-                          ),
-                          if (l.mask != null)
-                            Positioned(
-                              right: 8 * u,
-                              bottom: 8 * u,
-                              child: GestureDetector(
-                                onTap: () => es.maskBadgeTap(i),
-                                child: Container(
-                                  width: 50 * u,
-                                  height: 50 * u,
-                                  decoration: BoxDecoration(
-                                    color: Colors.black,
-                                    borderRadius: BorderRadius.circular(6 * u),
-                                    border: Border.all(
-                                      color: (es.editMask && i == es.selected)
-                                          ? const Color(0xFF4DB3FF)
-                                          : Colors.white54,
-                                      width: 3 * u,
+                          AspectRatio(
+                            aspectRatio: 1,
+                            child: Stack(
+                              children: [
+                                Positioned.fill(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(11),
+                                    child: Container(
+                                      color: Pal.surface2,
+                                      child: RawImage(image: l.image, fit: BoxFit.contain),
                                     ),
                                   ),
-                                  clipBehavior: Clip.antiAlias,
-                                  child: ColorFiltered(
-                                    colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
-                                    child: RawImage(image: l.mask!, fit: BoxFit.contain),
-                                  ),
                                 ),
-                              ),
-                            ),
-                          Positioned(
-                            left: 6 * u,
-                            top: 6 * u,
-                            child: GestureDetector(
-                              onTap: () => es.toggleVisible(i),
-                              child: Container(
-                                width: 62 * u,
-                                height: 62 * u,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF242424),
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: l.visible ? const Color(0xFFB8B8B8) : const Color(0xFF3A3A3A),
-                                    width: 4 * u,
-                                  ),
-                                ),
-                                alignment: Alignment.center,
-                                child: l.visible
-                                    ? Container(
-                                        width: 26 * u,
-                                        height: 26 * u,
-                                        decoration: const BoxDecoration(
-                                          color: Colors.white,
-                                          shape: BoxShape.circle,
+                                Positioned(
+                                  left: 4,
+                                  top: 4,
+                                  child: GestureDetector(
+                                    onTap: () => es.toggleVisible(i),
+                                    child: Container(
+                                      width: 24,
+                                      height: 24,
+                                      decoration: BoxDecoration(
+                                        color: const Color(0x99000000),
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: l.visible ? Colors.white70 : Colors.white24,
                                         ),
-                                      )
-                                    : null,
-                              ),
+                                      ),
+                                      child: Icon(
+                                        l.visible ? Icons.visibility : Icons.visibility_off,
+                                        size: 13,
+                                        color: l.visible ? Colors.white : Colors.white54,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                if (l.mask != null)
+                                  Positioned(
+                                    right: 4,
+                                    bottom: 4,
+                                    child: GestureDetector(
+                                      onTap: () => es.maskBadgeTap(i),
+                                      child: Container(
+                                        width: 28,
+                                        height: 28,
+                                        decoration: BoxDecoration(
+                                          color: Colors.black,
+                                          borderRadius: BorderRadius.circular(7),
+                                          border: Border.all(
+                                            color: (es.editMask && i == es.selected)
+                                                ? Pal.accent
+                                                : Colors.white54,
+                                            width: 2,
+                                          ),
+                                        ),
+                                        clipBehavior: Clip.antiAlias,
+                                        child: ColorFiltered(
+                                          colorFilter: const ColorFilter.mode(
+                                              Colors.white, BlendMode.srcIn),
+                                          child: RawImage(image: l.mask!, fit: BoxFit.contain),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                              ],
                             ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            l.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 9.5, color: Pal.mut),
                           ),
                         ],
                       ),
                     ),
-                  );
-                },
-              ),
+                  ),
+                );
+              },
             ),
           ),
           Container(
-            height: 120 * u,
-            color: const Color(0xFF2A2A2A),
+            height: 58,
+            decoration: BoxDecoration(border: Border(top: BorderSide(color: Pal.line))),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
-                GestureDetector(
+                Pressable(
                   onTap: () => _layerMenu(es),
-                  child: Icon(Icons.layers, color: Colors.white, size: 72 * u),
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: Pal.fill,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(Icons.tune, size: 21, color: Pal.txt),
+                  ),
                 ),
-                GestureDetector(
-                  onTap: es.addLayer,
-                  child: Icon(Icons.add, color: Colors.white, size: 84 * u),
+                Pressable(
+                  onTap: () => showAddLayerDialog(pageContext, es),
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: Pal.accent,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(Icons.add, size: 24, color: Pal.onAccent),
+                  ),
                 ),
               ],
             ),
@@ -5834,26 +6526,27 @@ class App extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'PixelStudio',
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        colorSchemeSeed: kBlue,
+    return Consumer<AppTheme>(
+      builder: (context, theme, _) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        title: 'PixelStudio',
+        theme: buildTheme(),
+        home: const GalleryPage(),
       ),
-      home: const GalleryPage(),
     );
   }
 }
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  final appTheme = AppTheme();
+  await appTheme.load();
   final store = ProjectStore()..load();
   final es = EditorState()..store = store;
   runApp(
     MultiProvider(
       providers: [
+        ChangeNotifierProvider<AppTheme>.value(value: appTheme),
         ChangeNotifierProvider<ProjectStore>.value(value: store),
         ChangeNotifierProvider<EditorState>.value(value: es),
       ],
