@@ -1108,6 +1108,16 @@ class EditorState extends ChangeNotifier {
       if (xfActive && identical(l, cur) && xfBase != null && xfFloat != null) {
         c.drawImage(xfBase!, Offset.zero, Paint());
         _drawXf(c, xfFloat!);
+      } else if (gradActive && !_skipGrad && identical(l, cur)) {
+        c.drawImage(l.image, Offset.zero, Paint());
+        if (selMask != null) {
+          c.saveLayer(rect, Paint());
+          c.drawRect(rect, gradPaint());
+          c.drawImage(selMask!, Offset.zero, Paint()..blendMode = BlendMode.dstIn);
+          c.restore();
+        } else {
+          c.drawRect(rect, gradPaint());
+        }
       } else if (identical(l, cur) && (previewMatrix != null || previewBlur != null)) {
         final pm = previewMatrix;
         final pb = previewBlur;
@@ -1237,6 +1247,10 @@ class EditorState extends ChangeNotifier {
       _cropDown(doc);
       return;
     }
+    if (gradActive) {
+      _gradDown(doc);
+      return;
+    }
     if (isPaintTool && !(current?.visible ?? false)) {
       toast('Layer is hidden');
       return;
@@ -1264,6 +1278,10 @@ class EditorState extends ChangeNotifier {
       _cropMove(doc);
       return;
     }
+    if (gradActive) {
+      _gradMove(doc);
+      return;
+    }
     if (stroke.isNotEmpty) {
       stroke.add(doc);
       notifyListeners();
@@ -1277,6 +1295,7 @@ class EditorState extends ChangeNotifier {
     if (_busy) return;
     _xfKind = 0;
     _cropHandle = -1;
+    _gradDrag = 0;
     stroke = [];
     dragA = null;
     dragB = null;
@@ -1284,9 +1303,10 @@ class EditorState extends ChangeNotifier {
   }
 
   Future<void> gestureUp(Offset doc, bool moved) async {
-    if (xfActive || cropActive) {
+    if (xfActive || cropActive || gradActive) {
       _xfKind = 0;
       _cropHandle = -1;
+      _gradDrag = 0;
       return;
     }
     if (isPaintTool) {
@@ -3346,6 +3366,192 @@ class EditorState extends ChangeNotifier {
         editMask = false;
       });
 
+  // ======================================================
+  // Batch 6: interactive gradient tool (PS Touch style)
+  // ======================================================
+  bool gradActive = false;
+  bool gradRadial = false;
+  Offset gradA = Offset.zero;
+  Offset gradB = Offset.zero;
+  Color gradC1 = Colors.black;
+  Color gradC2 = const Color(0x00000000);
+  int gradStop = 0;
+  bool gradEditor = false;
+  bool gradPresets = false;
+  bool gradHsb = true;
+  bool gradPick = false;
+  int _gradDrag = 0;
+  bool _skipGrad = false;
+
+  Color get gradColor => gradStop == 0 ? gradC1 : gradC2;
+
+  void startGradient() {
+    if (current == null) return;
+    gradActive = true;
+    gradRadial = false;
+    gradC1 = color.withValues(alpha: 1);
+    gradC2 = color.withValues(alpha: 0);
+    gradStop = 0;
+    gradEditor = false;
+    gradPresets = false;
+    gradPick = false;
+    gradA = Offset(docW * 0.3, docH * 0.12);
+    gradB = Offset(docW * 0.7, docH * 0.88);
+    menu = null;
+    toolMenuOpen = false;
+    openGroup = null;
+    notifyListeners();
+  }
+
+  Paint gradPaint() {
+    final p = Paint();
+    if (gradRadial) {
+      final r = math.max(1.0, (gradB - gradA).distance);
+      p.shader = ui.Gradient.radial(gradA, r, [gradC1, gradC2]);
+    } else {
+      final b = (gradB - gradA).distance < 1 ? gradA + const Offset(1, 1) : gradB;
+      p.shader = ui.Gradient.linear(gradA, b, [gradC1, gradC2]);
+    }
+    return p;
+  }
+
+  void _gradDown(Offset doc) {
+    if (gradPick) {
+      _gradPickAt(doc);
+      return;
+    }
+    final r = 46 / scale;
+    final da = (gradA - doc).distance;
+    final db = (gradB - doc).distance;
+    if (da < r && da <= db) {
+      _gradDrag = 1;
+    } else if (db < r) {
+      _gradDrag = 2;
+    } else {
+      gradA = doc;
+      gradB = doc;
+      _gradDrag = 2;
+    }
+    notifyListeners();
+  }
+
+  void _gradMove(Offset doc) {
+    if (_gradDrag == 1) {
+      gradA = doc;
+    } else if (_gradDrag == 2) {
+      gradB = doc;
+    } else {
+      return;
+    }
+    notifyListeners();
+  }
+
+  Future<void> _gradPickAt(Offset doc) async {
+    final x = doc.dx.floor();
+    final y = doc.dy.floor();
+    if (x < 0 || y < 0 || x >= docW || y >= docH) return;
+    _skipGrad = true;
+    final fut = renderImage(docW, docH, (c) => paintDoc(c, preview: false));
+    _skipGrad = false;
+    final img = await fut;
+    final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (bd == null) return;
+    final d = bd.buffer.asUint8List();
+    final i = (y * docW + x) * 4;
+    final a = d[i + 3];
+    if (a == 0) return;
+    final inv = 255.0 / a;
+    final c = Color.fromARGB(255, _c255(d[i] * inv), _c255(d[i + 1] * inv), _c255(d[i + 2] * inv));
+    gradSetColor(c.withValues(alpha: gradColor.a));
+    gradPick = false;
+    notifyListeners();
+  }
+
+  void gradSetColor(Color c) {
+    if (gradStop == 0) {
+      gradC1 = c;
+    } else {
+      gradC2 = c;
+    }
+    notifyListeners();
+  }
+
+  void gradSelectStop(int i) {
+    if (gradStop == i && gradEditor) {
+      gradEditor = false;
+    } else {
+      gradStop = i;
+      gradEditor = true;
+      gradPresets = false;
+    }
+    notifyListeners();
+  }
+
+  void gradTogglePresets() {
+    gradPresets = !gradPresets;
+    gradEditor = false;
+    notifyListeners();
+  }
+
+  void gradPreset(Color a, Color b, bool radial) {
+    gradC1 = a;
+    gradC2 = b;
+    gradRadial = radial;
+    gradPresets = false;
+    notifyListeners();
+  }
+
+  void gradSetType(bool radial) {
+    gradRadial = radial;
+    notifyListeners();
+  }
+
+  void gradReverse() {
+    final t = gradC1;
+    gradC1 = gradC2;
+    gradC2 = t;
+    notifyListeners();
+  }
+
+  void gradSetHsb(bool v) {
+    gradHsb = v;
+    notifyListeners();
+  }
+
+  void gradTogglePick() {
+    gradPick = !gradPick;
+    if (gradPick) toast('Tap the image to pick a color');
+    notifyListeners();
+  }
+
+  void gradCancel() {
+    gradActive = false;
+    gradEditor = false;
+    gradPresets = false;
+    gradPick = false;
+    notifyListeners();
+  }
+
+  Future<void> gradApply() => _guard('Applying...', () async {
+        final l = current;
+        if (l == null) {
+          gradActive = false;
+          return;
+        }
+        final old = l.image;
+        final comp = await renderImage(docW, docH, (c) {
+          c.drawImage(old, Offset.zero, Paint());
+          c.drawRect(_rect, gradPaint());
+        });
+        final res = await _masked(old, comp);
+        _pushUndo();
+        l.image = res;
+        gradActive = false;
+        gradEditor = false;
+        gradPresets = false;
+        gradPick = false;
+      });
+
   // ---------- view ----------
   Offset toDoc(Offset p) => (p - offset) / scale;
 
@@ -3590,6 +3796,34 @@ class DocPainter extends CustomPainter {
   void _extraOverlays(Canvas canvas) {
     final sc = s.scale;
     final lw = 2 / sc;
+    if (s.gradActive) {
+      final a = s.gradA;
+      final b = s.gradB;
+      final dark = Paint()
+        ..strokeWidth = 4.5 / sc
+        ..strokeCap = StrokeCap.round
+        ..color = const Color(0x66000000);
+      final line = Paint()
+        ..strokeWidth = 2.2 / sc
+        ..strokeCap = StrokeCap.round
+        ..color = Colors.white;
+      canvas.drawLine(a, b, dark);
+      canvas.drawLine(a, b, line);
+      if (s.gradRadial) {
+        canvas.drawCircle(
+          a,
+          (b - a).distance,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.6 / sc
+            ..color = const Color(0x99FFFFFF),
+        );
+      }
+      for (final p in [a, b]) {
+        canvas.drawCircle(p, 20 / sc, Paint()..color = const Color(0x66808080));
+        canvas.drawCircle(p, 15 / sc, Paint()..color = Colors.white);
+      }
+    }
     if (s.ptrMode) {
       final p = s.ptr;
       final r = 20 / sc;
@@ -4999,11 +5233,16 @@ class _EditorPageState extends State<EditorPage> {
               ),
             ),
           ),
+          if (es.ptrMode)
+            PointerControls(
+              bottom: bottomInset + 4,
+              rightInset: es.layersOpen ? 94 + 10 + 16 : 22,
+            ),
           Positioned(
             right: 10,
             top: topInset - 4,
             bottom: bottomInset - 8,
-            width: 112,
+            width: 94,
             child: IgnorePointer(
               ignoring: !es.layersOpen,
               child: AnimatedSlide(
@@ -5018,7 +5257,6 @@ class _EditorPageState extends State<EditorPage> {
               ),
             ),
           ),
-          if (es.ptrMode) PointerControls(bottom: bottomInset + 4),
           if (es.tool == Tool.polygon && es.poly.length >= 3)
             Positioned(
               bottom: bottomInset + 6,
@@ -5046,6 +5284,13 @@ class _EditorPageState extends State<EditorPage> {
               ),
             ),
           if (es.toolMenuOpen) ToolColumn(bottom: dockBottom + kDockH + 8),
+          if (es.gradActive && es.gradEditor && !es.gradPresets)
+            Positioned(
+              left: 10,
+              right: 10,
+              bottom: dockBottom + kDockH + 8,
+              child: const GradientEditorPanel(),
+            ),
           Positioned(
             left: 10,
             right: 10,
@@ -5414,13 +5659,7 @@ class MenuLayer extends StatelessWidget {
       _Item(Icons.open_with, 'Transform', true, es.startTransform),
       _pd(es, Icons.grid_on, 'Warp', const [Param('Bulge / Pinch', -1, 1, 0.5), Param('Twirl', -3, 3, 0), Param('Radius', 0.2, 1, 0.6), Param('X', 0, 1, 0.5), Param('Y', 0, 1, 0.5)], (v) => es.applyWarp(v[0], v[1], v[2], v[3], v[4])),
       _Item(Icons.format_color_fill, 'Fill & Stroke', true, es.fillSelection),
-      _Item(Icons.gradient, 'Gradient', true, () async {
-        final v = await paramDialog(pc, 'Gradient', [
-          const Param('Angle', 0, 360, 90),
-          const Param('End: 0 = white, 1 = clear', 0, 1, 1),
-        ]);
-        if (v != null) await es.applyGradient(v[0], v[1] > 0.5);
-      }),
+      _Item(Icons.gradient, 'Gradient', true, es.startGradient),
       _pd(es, Icons.blur_linear, 'Fade', const [Param('Angle', 0, 360, 90), Param('Start', 0, 0.95, 0.2), Param('End', 0.05, 1, 1)], (v) => es.applyFade(v[0], v[1], v[2])),
       _Item(Icons.flare, 'Lens Flare', true, () async {
         final v = await paramDialog(pc, 'Lens Flare', [
@@ -5641,6 +5880,561 @@ class MenuLayer extends StatelessWidget {
 // Tool column (left flyout)
 // ============================================================
 // ============================================================
+// Gradient tool UI (PS Touch style): dock, presets, color editor
+// ============================================================
+class _CheckerPainter extends CustomPainter {
+  final double cell;
+  const _CheckerPainter([this.cell = 8]);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final a = Paint()..color = const Color(0xFFE2E2E2);
+    final b = Paint()..color = const Color(0xFF9C9C9C);
+    canvas.drawRect(Offset.zero & size, a);
+    for (double y = 0; y < size.height; y += cell) {
+      for (double x = 0; x < size.width; x += cell) {
+        if (((x / cell).floor() + (y / cell).floor()).isOdd) {
+          canvas.drawRect(Rect.fromLTWH(x, y, cell, cell), b);
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CheckerPainter old) => old.cell != cell;
+}
+
+class _GradPreset {
+  final Color a;
+  final Color b;
+  final bool radial;
+  const _GradPreset(this.a, this.b, this.radial);
+}
+
+const List<_GradPreset> _gradPresets = [
+  _GradPreset(Color(0xFF7B1FA2), Color(0xFF2A0A3A), false),
+  _GradPreset(Color(0xFFFFFFFF), Color(0xFFD50000), true),
+  _GradPreset(Color(0xFF8D4E4E), Color(0xFF3E2222), false),
+  _GradPreset(Color(0xFFB36AD9), Color(0xFFE056F0), false),
+  _GradPreset(Color(0xFFFF9A3C), Color(0xFFFF3D7F), false),
+  _GradPreset(Color(0xFF30E3CA), Color(0xFF1B5CFF), false),
+  _GradPreset(Color(0xFFFFFFFF), Color(0xFF000000), false),
+  _GradPreset(Color(0xFFFFE08A), Color(0x00FFE08A), true),
+];
+
+Widget _gradSwatch(Color a, Color b, bool radial, double w, double h, {double radius = 12}) {
+  return ClipRRect(
+    borderRadius: BorderRadius.circular(radius),
+    child: SizedBox(
+      width: w,
+      height: h,
+      child: Stack(
+        children: [
+          const Positioned.fill(child: CustomPaint(painter: _CheckerPainter(6))),
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: radial
+                    ? RadialGradient(colors: [a, b])
+                    : LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [a, b],
+                      ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class GradientDock extends StatelessWidget {
+  final BuildContext pageContext;
+  const GradientDock({super.key, required this.pageContext});
+
+  Widget _circle(IconData icon, VoidCallback onTap, {bool primary = false, Color? iconColor}) {
+    return Pressable(
+      onTap: onTap,
+      child: Container(
+        width: 46,
+        height: 46,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: primary ? Pal.accent : Pal.fill,
+          border: Border.all(color: primary ? Colors.transparent : Pal.line),
+        ),
+        child: Icon(icon, size: 24, color: iconColor ?? (primary ? Pal.onAccent : Pal.txt)),
+      ),
+    );
+  }
+
+  Widget _stop(EditorState es, int i) {
+    final c = i == 0 ? es.gradC1 : es.gradC2;
+    final sel = es.gradStop == i && es.gradEditor;
+    return Pressable(
+      onTap: () => es.gradSelectStop(i),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        width: sel ? 38 : 32,
+        height: sel ? 38 : 32,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: sel ? Pal.accent : Colors.white, width: sel ? 3 : 2),
+          boxShadow: const [BoxShadow(color: Color(0x66000000), blurRadius: 8)],
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          children: [
+            const Positioned.fill(child: CustomPaint(painter: _CheckerPainter(6))),
+            Positioned.fill(child: ColoredBox(color: c)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final es = context.watch<EditorState>();
+    context.watch<AppTheme>();
+    final cur = _gradSwatch(es.gradC1, es.gradC2, es.gradRadial, 56, 44, radius: 10);
+
+    if (es.gradPresets) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        decoration: surfaceDeco(radius: 26),
+        child: Row(
+          children: [
+            _circle(Icons.palette_outlined, es.gradTogglePresets),
+            const SizedBox(width: 8),
+            Expanded(
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: Pressable(
+                      onTap: es.gradTogglePresets,
+                      child: Stack(
+                        children: [
+                          cur,
+                          Positioned(
+                            right: 4,
+                            bottom: 4,
+                            child: Container(
+                              width: 18,
+                              height: 18,
+                              decoration: const BoxDecoration(
+                                color: Color(0x99000000),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(Icons.chevron_right, size: 14, color: Colors.white),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  for (final p in _gradPresets)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Pressable(
+                        onTap: () => es.gradPreset(p.a, p.b, p.radial),
+                        child: _gradSwatch(p.a, p.b, p.radial, 56, 44, radius: 10),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            _circle(Icons.close, es.gradCancel, iconColor: const Color(0xFFFF6B6B)),
+            const SizedBox(width: 8),
+            _circle(Icons.check, es.gradApply, primary: true),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: surfaceDeco(radius: 26),
+      child: Row(
+        children: [
+          _circle(Icons.apps, es.gradTogglePresets),
+          const SizedBox(width: 10),
+          Expanded(
+            child: SizedBox(
+              height: 62,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Positioned(
+                    left: 14,
+                    right: 14,
+                    top: 8,
+                    height: 26,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(9),
+                      child: Stack(
+                        children: [
+                          const Positioned.fill(child: CustomPaint(painter: _CheckerPainter(6))),
+                          Positioned.fill(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(colors: [es.gradC1, es.gradC2]),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Positioned(left: 0, top: 24, child: _stop(es, 0)),
+                  Positioned(right: 0, top: 24, child: _stop(es, 1)),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          PopupMenuButton<String>(
+            color: Pal.surface,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            onSelected: (v) {
+              buzz();
+              if (v == 'linear') {
+                es.gradSetType(false);
+              } else if (v == 'radial') {
+                es.gradSetType(true);
+              } else {
+                es.gradReverse();
+              }
+            },
+            itemBuilder: (c) => [
+              PopupMenuItem<String>(
+                value: 'linear',
+                child: Row(children: [
+                  Icon(Icons.gradient, color: es.gradRadial ? Pal.txt : Pal.accent),
+                  const SizedBox(width: 12),
+                  Text('Linear type', style: lbl(15)),
+                ]),
+              ),
+              PopupMenuItem<String>(
+                value: 'radial',
+                child: Row(children: [
+                  Icon(Icons.blur_circular, color: es.gradRadial ? Pal.accent : Pal.txt),
+                  const SizedBox(width: 12),
+                  Text('Radial type', style: lbl(15)),
+                ]),
+              ),
+              PopupMenuItem<String>(
+                value: 'reverse',
+                child: Row(children: [
+                  Icon(Icons.swap_horiz, color: Pal.txt),
+                  const SizedBox(width: 12),
+                  Text('Reverse spots', style: lbl(15)),
+                ]),
+              ),
+            ],
+            child: Container(
+              width: 44,
+              height: 44,
+              alignment: Alignment.center,
+              child: Icon(Icons.menu_open, size: 26, color: Pal.txt),
+            ),
+          ),
+          _circle(Icons.close, es.gradCancel, iconColor: const Color(0xFFFF6B6B)),
+          const SizedBox(width: 8),
+          _circle(Icons.check, es.gradApply, primary: true),
+        ],
+      ),
+    );
+  }
+}
+
+class _GSlider extends StatelessWidget {
+  final String label;
+  final String text;
+  final double value;
+  final double min;
+  final double max;
+  final List<Color> track;
+  final bool checker;
+  final ValueChanged<double> onChanged;
+  const _GSlider({
+    required this.label,
+    required this.text,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.track,
+    required this.onChanged,
+    this.checker = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Text(label, style: lbl(11.5, color: Pal.mut)),
+                ),
+                SizedBox(
+                  height: 26,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Positioned.fill(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(5),
+                            child: Stack(
+                              children: [
+                                if (checker)
+                                  const Positioned.fill(
+                                    child: CustomPaint(painter: _CheckerPainter(5)),
+                                  ),
+                                Positioned.fill(
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      gradient: LinearGradient(colors: track),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 0.01,
+                          activeTrackColor: Colors.transparent,
+                          inactiveTrackColor: Colors.transparent,
+                          thumbColor: Colors.white,
+                          overlayShape: SliderComponentShape.noOverlay,
+                          thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 10),
+                        ),
+                        child: Slider(
+                          value: math.max(min, math.min(max, value)),
+                          min: min,
+                          max: max,
+                          onChanged: onChanged,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            width: 58,
+            height: 32,
+            alignment: Alignment.center,
+            margin: const EdgeInsets.only(top: 12),
+            decoration: BoxDecoration(
+              color: Pal.fill,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: Pal.line),
+            ),
+            child: Text(text, style: lbl(13)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class GradientEditorPanel extends StatelessWidget {
+  const GradientEditorPanel({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final es = context.watch<EditorState>();
+    context.watch<AppTheme>();
+    final c = es.gradColor;
+    final hsv = HSVColor.fromColor(c);
+    final al = c.a;
+    final hsb = es.gradHsb;
+    final r = (c.r * 255).round();
+    final g = (c.g * 255).round();
+    final b = (c.b * 255).round();
+
+    Color fromHsv(double h, double s, double v) =>
+        HSVColor.fromAHSV(al, h, s, v).toColor();
+    Color fromRgb(int rr, int gg, int bb) =>
+        Color.fromARGB((al * 255).round(), rr, gg, bb);
+
+    final rows = <Widget>[];
+    if (hsb) {
+      rows.addAll([
+        _GSlider(
+          label: 'Hue',
+          text: '${hsv.hue.round()}°',
+          value: hsv.hue,
+          min: 0,
+          max: 359.9,
+          track: [
+            for (int i = 0; i <= 6; i++) HSVColor.fromAHSV(1, i * 60.0, 0.85, 0.95).toColor(),
+          ],
+          onChanged: (v) => es.gradSetColor(fromHsv(v, hsv.saturation, hsv.value)),
+        ),
+        _GSlider(
+          label: 'Saturation',
+          text: '${(hsv.saturation * 100).round()}%',
+          value: hsv.saturation,
+          min: 0,
+          max: 1,
+          track: [fromHsv(hsv.hue, 0, hsv.value).withValues(alpha: 1), fromHsv(hsv.hue, 1, hsv.value).withValues(alpha: 1)],
+          onChanged: (v) => es.gradSetColor(fromHsv(hsv.hue, v, hsv.value)),
+        ),
+        _GSlider(
+          label: 'Brightness',
+          text: '${(hsv.value * 100).round()}%',
+          value: hsv.value,
+          min: 0,
+          max: 1,
+          track: [Colors.black, fromHsv(hsv.hue, hsv.saturation, 1).withValues(alpha: 1)],
+          onChanged: (v) => es.gradSetColor(fromHsv(hsv.hue, hsv.saturation, v)),
+        ),
+      ]);
+    } else {
+      rows.addAll([
+        _GSlider(
+          label: 'Red',
+          text: '$r',
+          value: r.toDouble(),
+          min: 0,
+          max: 255,
+          track: [Color.fromARGB(255, 0, g, b), Color.fromARGB(255, 255, g, b)],
+          onChanged: (v) => es.gradSetColor(fromRgb(v.round(), g, b)),
+        ),
+        _GSlider(
+          label: 'Green',
+          text: '$g',
+          value: g.toDouble(),
+          min: 0,
+          max: 255,
+          track: [Color.fromARGB(255, r, 0, b), Color.fromARGB(255, r, 255, b)],
+          onChanged: (v) => es.gradSetColor(fromRgb(r, v.round(), b)),
+        ),
+        _GSlider(
+          label: 'Blue',
+          text: '$b',
+          value: b.toDouble(),
+          min: 0,
+          max: 255,
+          track: [Color.fromARGB(255, r, g, 0), Color.fromARGB(255, r, g, 255)],
+          onChanged: (v) => es.gradSetColor(fromRgb(r, g, v.round())),
+        ),
+      ]);
+    }
+    rows.add(
+      _GSlider(
+        label: 'Opacity',
+        text: '${(al * 100).round()}%',
+        value: al,
+        min: 0,
+        max: 1,
+        checker: true,
+        track: [c.withValues(alpha: 0), c.withValues(alpha: 1)],
+        onChanged: (v) => es.gradSetColor(c.withValues(alpha: v)),
+      ),
+    );
+
+    Widget modeBtn(String t, bool on) => Pressable(
+          onTap: () => es.gradSetHsb(t == 'HSB'),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            width: 56,
+            height: 30,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: on ? Pal.accent : Pal.fill,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(t, style: lbl(12.5, color: on ? Pal.onAccent : Pal.mut)),
+          ),
+        );
+
+    Widget swatch(Color col, {bool checker = false, VoidCallback? onTap, double w = 52}) => Pressable(
+          onTap: onTap,
+          child: Container(
+            width: w,
+            height: 38,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: Pal.line),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Stack(
+              children: [
+                if (checker) const Positioned.fill(child: CustomPaint(painter: _CheckerPainter(6))),
+                Positioned.fill(child: ColoredBox(color: col)),
+              ],
+            ),
+          ),
+        );
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+      decoration: surfaceDeco(radius: 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Text(es.gradStop == 0 ? 'Start color' : 'End color', style: lbl(14)),
+              const Spacer(),
+              modeBtn('HSB', hsb),
+              const SizedBox(width: 6),
+              modeBtn('RGB', !hsb),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ...rows,
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              swatch(c, checker: true, w: 78),
+              const SizedBox(width: 10),
+              swatch(Colors.black, onTap: () => es.gradSetColor(Colors.black.withValues(alpha: al))),
+              const SizedBox(width: 10),
+              swatch(Colors.white, onTap: () => es.gradSetColor(Colors.white.withValues(alpha: al))),
+              const Spacer(),
+              Pressable(
+                onTap: es.gradTogglePick,
+                child: Container(
+                  width: 46,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: es.gradPick ? Pal.tint(0.25) : Pal.fill,
+                    borderRadius: BorderRadius.circular(11),
+                    border: Border.all(color: es.gradPick ? Pal.accent : Pal.line),
+                  ),
+                  child: Icon(Icons.colorize, size: 22, color: es.gradPick ? Pal.accent : Pal.txt),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
 // Tool column (left flyout)
 // ============================================================
 class ToolColumn extends StatelessWidget {
@@ -5808,7 +6602,8 @@ class ToolColumn extends StatelessWidget {
 // ============================================================
 class PointerControls extends StatefulWidget {
   final double bottom;
-  const PointerControls({super.key, required this.bottom});
+  final double rightInset;
+  const PointerControls({super.key, required this.bottom, this.rightInset = 22});
 
   @override
   State<PointerControls> createState() => _PointerControlsState();
@@ -5826,7 +6621,7 @@ class _PointerControlsState extends State<PointerControls> {
       child: Stack(
         children: [
           Positioned(
-            right: 22,
+            right: widget.rightInset,
             bottom: widget.bottom,
             child: GestureDetector(
               onPanStart: (_) => setState(() => _drag = true),
@@ -6154,6 +6949,8 @@ class BottomBar extends StatelessWidget {
     const sz = 22.0;
     final grey = Pal.mut;
 
+    if (es.gradActive) return GradientDock(pageContext: pageContext);
+
     Widget bar(Widget left, Widget mid, Widget right) => Container(
           padding: const EdgeInsets.symmetric(horizontal: 8),
           decoration: surfaceDeco(radius: 26),
@@ -6356,13 +7153,13 @@ class LayersPanel extends StatelessWidget {
     context.watch<AppTheme>();
     final n = es.layers.length;
     return Container(
-      decoration: surfaceDeco(radius: 24),
+      decoration: surfaceDeco(radius: 22),
       clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
           Expanded(
             child: ReorderableListView.builder(
-              padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+              padding: const EdgeInsets.fromLTRB(6, 6, 6, 0),
               itemCount: n,
               onReorder: (oldD, newD) {
                 if (newD > oldD) newD -= 1;
@@ -6374,7 +7171,7 @@ class LayersPanel extends StatelessWidget {
                 final sel = i == es.selected;
                 return Padding(
                   key: ValueKey(l.id),
-                  padding: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.only(bottom: 6),
                   child: GestureDetector(
                     onTap: () {
                       buzz();
@@ -6383,16 +7180,16 @@ class LayersPanel extends StatelessWidget {
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 240),
                       curve: Curves.easeOut,
-                      padding: const EdgeInsets.all(5),
+                      padding: const EdgeInsets.all(4),
                       decoration: BoxDecoration(
                         color: sel ? Pal.tint(0.16) : Pal.fill,
-                        borderRadius: BorderRadius.circular(16),
+                        borderRadius: BorderRadius.circular(14),
                         border: Border.all(
                           color: sel ? Pal.accent : Colors.transparent,
-                          width: 1.5,
+                          width: 1.4,
                         ),
                         boxShadow: sel
-                            ? [BoxShadow(color: Pal.tint(0.3), blurRadius: 14)]
+                            ? [BoxShadow(color: Pal.tint(0.28), blurRadius: 12)]
                             : const [],
                       ),
                       child: Column(
@@ -6403,7 +7200,7 @@ class LayersPanel extends StatelessWidget {
                               children: [
                                 Positioned.fill(
                                   child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(11),
+                                    borderRadius: BorderRadius.circular(10),
                                     child: Container(
                                       color: Pal.surface2,
                                       child: RawImage(image: l.image, fit: BoxFit.contain),
@@ -6411,13 +7208,13 @@ class LayersPanel extends StatelessWidget {
                                   ),
                                 ),
                                 Positioned(
-                                  left: 4,
-                                  top: 4,
+                                  left: 3,
+                                  top: 3,
                                   child: GestureDetector(
                                     onTap: () => es.toggleVisible(i),
                                     child: Container(
-                                      width: 24,
-                                      height: 24,
+                                      width: 20,
+                                      height: 20,
                                       decoration: BoxDecoration(
                                         color: const Color(0x99000000),
                                         shape: BoxShape.circle,
@@ -6427,7 +7224,7 @@ class LayersPanel extends StatelessWidget {
                                       ),
                                       child: Icon(
                                         l.visible ? Icons.visibility : Icons.visibility_off,
-                                        size: 13,
+                                        size: 11,
                                         color: l.visible ? Colors.white : Colors.white54,
                                       ),
                                     ),
@@ -6435,21 +7232,21 @@ class LayersPanel extends StatelessWidget {
                                 ),
                                 if (l.mask != null)
                                   Positioned(
-                                    right: 4,
-                                    bottom: 4,
+                                    right: 3,
+                                    bottom: 3,
                                     child: GestureDetector(
                                       onTap: () => es.maskBadgeTap(i),
                                       child: Container(
-                                        width: 28,
-                                        height: 28,
+                                        width: 22,
+                                        height: 22,
                                         decoration: BoxDecoration(
                                           color: Colors.black,
-                                          borderRadius: BorderRadius.circular(7),
+                                          borderRadius: BorderRadius.circular(6),
                                           border: Border.all(
                                             color: (es.editMask && i == es.selected)
                                                 ? Pal.accent
                                                 : Colors.white54,
-                                            width: 2,
+                                            width: 1.6,
                                           ),
                                         ),
                                         clipBehavior: Clip.antiAlias,
@@ -6464,12 +7261,12 @@ class LayersPanel extends StatelessWidget {
                               ],
                             ),
                           ),
-                          const SizedBox(height: 4),
+                          const SizedBox(height: 3),
                           Text(
                             l.name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 9.5, color: Pal.mut),
+                            style: TextStyle(fontSize: 9, color: Pal.mut),
                           ),
                         ],
                       ),
@@ -6480,7 +7277,7 @@ class LayersPanel extends StatelessWidget {
             ),
           ),
           Container(
-            height: 58,
+            height: 48,
             decoration: BoxDecoration(border: Border(top: BorderSide(color: Pal.line))),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -6488,25 +7285,25 @@ class LayersPanel extends StatelessWidget {
                 Pressable(
                   onTap: () => _layerMenu(es),
                   child: Container(
-                    width: 40,
-                    height: 40,
+                    width: 34,
+                    height: 34,
                     decoration: BoxDecoration(
                       color: Pal.fill,
-                      borderRadius: BorderRadius.circular(14),
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    child: Icon(Icons.tune, size: 21, color: Pal.txt),
+                    child: Icon(Icons.tune, size: 18, color: Pal.txt),
                   ),
                 ),
                 Pressable(
                   onTap: () => showAddLayerDialog(pageContext, es),
                   child: Container(
-                    width: 40,
-                    height: 40,
+                    width: 34,
+                    height: 34,
                     decoration: BoxDecoration(
                       color: Pal.accent,
-                      borderRadius: BorderRadius.circular(14),
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    child: Icon(Icons.add, size: 24, color: Pal.onAccent),
+                    child: Icon(Icons.add, size: 21, color: Pal.onAccent),
                   ),
                 ),
               ],
