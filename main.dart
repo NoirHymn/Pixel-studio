@@ -6,9 +6,11 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:gal/gal.dart';
+import 'package:image/image.dart' as img_lib;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
@@ -180,6 +182,58 @@ Future<Uint8List> pngBytes(ui.Image img) async {
   return d!.buffer.asUint8List();
 }
 
+class _JpgJob {
+  final Uint8List rgba;
+  final int w, h, q;
+  _JpgJob(this.rgba, this.w, this.h, this.q);
+}
+
+Uint8List _encodeJpgIsolate(_JpgJob j) {
+  final im = img_lib.Image.fromBytes(
+    width: j.w,
+    height: j.h,
+    bytes: j.rgba.buffer,
+    bytesOffset: j.rgba.offsetInBytes,
+    numChannels: 4,
+    order: img_lib.ChannelOrder.rgba,
+  );
+  return Uint8List.fromList(img_lib.encodeJpg(im, quality: j.q));
+}
+
+Future<int?> askJpgQuality(BuildContext context) {
+  double q = 90;
+  return showDialog<int>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setS) => AlertDialog(
+        backgroundColor: Pal.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+        title: Text('Export JPG', style: lbl(20)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Quality: ${q.round()}%', style: lbl(14)),
+            Slider(
+              value: q,
+              min: 10,
+              max: 100,
+              divisions: 90,
+              onChanged: (v) => setS(() => q = v),
+            ),
+            Text('Transparent areas become white.', style: lbl(12, color: Pal.mut)),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, q.round()), child: const Text('Save')),
+        ],
+      ),
+    ),
+  );
+}
+
 Future<Uint8List?> pickBytes(ImageSource src) async {
   final x = await ImagePicker().pickImage(source: src);
   if (x == null) return null;
@@ -201,6 +255,143 @@ Path dashPath(Path src, double on, double off) {
 // ============================================================
 // Model
 // ============================================================
+class _ContourJob {
+  final Uint8List alpha;
+  final int w, h;
+  _ContourJob(this.alpha, this.w, this.h);
+}
+
+/// Marching squares on the (antialiased) selection alpha -> smooth closed polylines.
+List<Float32List> _contourIsolate(_ContourJob j) {
+  final w = j.w, h = j.h, a = j.alpha;
+  final w2 = w + 2;
+  int av(int x, int y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : a[y * w + x];
+  int hid(int x, int y) => ((y + 1) * w2 + (x + 1)) << 1;
+  int vid(int x, int y) => (((y + 1) * w2 + (x + 1)) << 1) | 1;
+  final pos = <int, List<double>>{};
+  final adj = <int, List<int>>{};
+  double frac(int a0, int a1) {
+    final d = (a1 - a0).toDouble();
+    if (d == 0) return 0.5;
+    final t = (127.5 - a0) / d;
+    return t < 0 ? 0.0 : (t > 1 ? 1.0 : t);
+  }
+
+  int pt(int id, double px, double py) {
+    if (!pos.containsKey(id)) pos[id] = [px, py];
+    return id;
+  }
+
+  void link(int p, int q) {
+    (adj[p] ??= <int>[]).add(q);
+    (adj[q] ??= <int>[]).add(p);
+  }
+
+  for (int y = -1; y < h; y++) {
+    for (int x = -1; x < w; x++) {
+      final tl = av(x, y), tr = av(x + 1, y), br = av(x + 1, y + 1), bl = av(x, y + 1);
+      final c = (tl > 127 ? 8 : 0) | (tr > 127 ? 4 : 0) | (br > 127 ? 2 : 0) | (bl > 127 ? 1 : 0);
+      if (c == 0 || c == 15) continue;
+      final t = pt(hid(x, y), x + 0.5 + frac(tl, tr), y + 0.5);
+      final b = pt(hid(x, y + 1), x + 0.5 + frac(bl, br), y + 1.5);
+      final l = pt(vid(x, y), x + 0.5, y + 0.5 + frac(tl, bl));
+      final r = pt(vid(x + 1, y), x + 1.5, y + 0.5 + frac(tr, br));
+      switch (c) {
+        case 1:
+        case 14:
+          link(l, b);
+          break;
+        case 2:
+        case 13:
+          link(b, r);
+          break;
+        case 3:
+        case 12:
+          link(l, r);
+          break;
+        case 4:
+        case 11:
+          link(t, r);
+          break;
+        case 5:
+          link(l, t);
+          link(b, r);
+          break;
+        case 6:
+        case 9:
+          link(t, b);
+          break;
+        case 7:
+        case 8:
+          link(l, t);
+          break;
+        case 10:
+          link(l, b);
+          link(t, r);
+          break;
+      }
+    }
+  }
+  final out = <Float32List>[];
+  for (final k in adj.keys.toList()) {
+    final first = adj[k];
+    if (first == null || first.isEmpty) continue;
+    final pts = <double>[];
+    int cur = k;
+    while (true) {
+      final cl = adj[cur];
+      if (cl == null || cl.isEmpty) break;
+      final nxt = cl.removeLast();
+      adj[nxt]?.remove(cur);
+      final p = pos[cur]!;
+      pts.add(p[0]);
+      pts.add(p[1]);
+      cur = nxt;
+    }
+    final p = pos[cur]!;
+    pts.add(p[0]);
+    pts.add(p[1]);
+    out.add(Float32List.fromList(pts));
+  }
+  return out;
+}
+
+Path _dashPolys(List<Float32List> polys, double on, double off, double phase) {
+  final path = Path();
+  final period = on + off;
+  for (final p in polys) {
+    if (p.length < 4) continue;
+    final o0 = phase % period;
+    bool draw = o0 < on;
+    double rem = draw ? on - o0 : period - o0;
+    double x = p[0], y = p[1];
+    if (draw) path.moveTo(x, y);
+    for (int i = 2; i + 1 < p.length; i += 2) {
+      final nx = p[i], ny = p[i + 1];
+      final dx = nx - x, dy = ny - y;
+      final len = math.sqrt(dx * dx + dy * dy);
+      double pos = 0;
+      while (len - pos > rem) {
+        pos += rem;
+        final t = pos / len;
+        final cx = x + dx * t, cy = y + dy * t;
+        if (draw) {
+          path.lineTo(cx, cy);
+        } else {
+          path.moveTo(cx, cy);
+        }
+        draw = !draw;
+        rem = draw ? on : off;
+      }
+      rem -= (len - pos);
+      if (draw) path.lineTo(nx, ny);
+      x = nx;
+      y = ny;
+    }
+  }
+  return path;
+}
+
 class DocLayer {
   final int id;
   String name;
@@ -826,6 +1017,20 @@ class EditorState extends ChangeNotifier {
     return pngBytes(img);
   }
 
+  Future<Uint8List> exportJpg(int quality) async {
+    final img = await renderImage(docW, docH, (c) {
+      c.drawRect(Rect.fromLTWH(0, 0, docW.toDouble(), docH.toDouble()),
+          Paint()..color = Colors.white);
+      paintDoc(c, preview: false);
+    });
+    final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+    final w = img.width, h = img.height;
+    img.dispose();
+    final px = Uint8List.fromList(
+        bd!.buffer.asUint8List(bd.offsetInBytes, bd.lengthInBytes));
+    return compute(_encodeJpgIsolate, _JpgJob(px, w, h, quality));
+  }
+
   // ---------- layers ----------
   Future<void> addLayer() async {
     final img = await renderImage(docW, docH, (c) {});
@@ -1108,6 +1313,30 @@ class EditorState extends ChangeNotifier {
       if (xfActive && identical(l, cur) && xfBase != null && xfFloat != null) {
         c.drawImage(xfBase!, Offset.zero, Paint());
         _drawXf(c, xfFloat!);
+      } else if (fillActive && fillPreview != null && !_skipGrad && identical(l, cur)) {
+        c.drawImage(l.image, Offset.zero, Paint());
+        c.drawImage(fillPreview!, Offset.zero, Paint());
+      } else if (fxActive && !_skipGrad && identical(l, cur)) {
+        _paintFx(c, l.image);
+      } else if (gradActive && gradFade && !_skipGrad && identical(l, cur)) {
+        if (selMask != null) {
+          c.saveLayer(rect, Paint());
+          c.drawImage(l.image, Offset.zero, Paint());
+          c.drawImage(selMask!, Offset.zero, Paint()..blendMode = BlendMode.dstOut);
+          c.restore();
+          c.saveLayer(rect, Paint()..blendMode = BlendMode.plus);
+          c.saveLayer(rect, Paint());
+          c.drawImage(l.image, Offset.zero, Paint());
+          c.drawRect(rect, gradPaint()..blendMode = BlendMode.dstIn);
+          c.restore();
+          c.drawImage(selMask!, Offset.zero, Paint()..blendMode = BlendMode.dstIn);
+          c.restore();
+        } else {
+          c.saveLayer(rect, Paint());
+          c.drawImage(l.image, Offset.zero, Paint());
+          c.drawRect(rect, gradPaint()..blendMode = BlendMode.dstIn);
+          c.restore();
+        }
       } else if (gradActive && !_skipGrad && identical(l, cur)) {
         c.drawImage(l.image, Offset.zero, Paint());
         if (selMask != null) {
@@ -1239,6 +1468,10 @@ class EditorState extends ChangeNotifier {
   // ---------- gestures ----------
   void gestureDown(Offset doc) {
     if (_busy) return;
+    if (colorPickTarget != 0) {
+      _pickGeneric(doc);
+      return;
+    }
     if (xfActive) {
       _xfDown(doc);
       return;
@@ -1251,6 +1484,7 @@ class EditorState extends ChangeNotifier {
       _gradDown(doc);
       return;
     }
+    if (fillActive || fxActive) return;
     if (isPaintTool && !(current?.visible ?? false)) {
       toast('Layer is hidden');
       return;
@@ -1282,6 +1516,7 @@ class EditorState extends ChangeNotifier {
       _gradMove(doc);
       return;
     }
+    if (fillActive || fxActive) return;
     if (stroke.isNotEmpty) {
       stroke.add(doc);
       notifyListeners();
@@ -1303,7 +1538,7 @@ class EditorState extends ChangeNotifier {
   }
 
   Future<void> gestureUp(Offset doc, bool moved) async {
-    if (xfActive || cropActive || gradActive) {
+    if (xfActive || cropActive || gradActive || fillActive || fxActive) {
       _xfKind = 0;
       _cropHandle = -1;
       _gradDrag = 0;
@@ -1520,13 +1755,17 @@ class EditorState extends ChangeNotifier {
     final b = bd.buffer.asUint8List();
     final n = docW * docH;
     final sel = Uint8List(n);
+    final al = Uint8List(n);
     bool any = false;
     for (int i = 0; i < n; i++) {
-      if (b[i * 4 + 3] > 127) {
+      final av = b[i * 4 + 3];
+      al[i] = av;
+      if (av > 127) {
         sel[i] = 1;
         any = true;
       }
     }
+    if (any) _alphaOf[mask] = al;
     return any ? sel : null;
   }
 
@@ -1541,6 +1780,7 @@ class EditorState extends ChangeNotifier {
     selEdge = edges[0];
     _startAnts();
     notifyListeners();
+    unawaited(_updateContour(m));
   }
 
   Future<void> _setSelection(ui.Image mask, {bool push = true}) async {
@@ -1563,6 +1803,7 @@ class EditorState extends ChangeNotifier {
     selEdges = edges;
     _startAnts();
     notifyListeners();
+    unawaited(_updateContour(mask));
   }
 
   Future<void> deselect() async {
@@ -1668,7 +1909,8 @@ class EditorState extends ChangeNotifier {
         for (int i = 0; i < w * h; i++) {
           px[i * 4 + 3] = out[i];
         }
-        final mask = await imageFromRgba(px, w, h);
+        final raw = await imageFromRgba(px, w, h);
+        final mask = antialias ? await _blurred(raw, 0.7) : raw;
         await applySelection(mask, selMode);
       });
 
@@ -1808,6 +2050,43 @@ class EditorState extends ChangeNotifier {
   Timer? _antTimer;
   ui.Image? selEdge2;
   List<ui.Image> selEdges = [];
+  List<Float32List> selContours = [];
+  Path? selPath;
+  ui.Image? selPathMask;
+  final Map<int, Path> _dashCache = {};
+  final Expando<Uint8List> _alphaOf = Expando<Uint8List>();
+
+  Path selDashed(double scale, int phase) {
+    final bucket = (math.log(scale) / math.log(1.15)).round();
+    final key = bucket * 4 + phase;
+    if (_dashCache.length > 48) _dashCache.clear();
+    return _dashCache.putIfAbsent(key, () {
+      final on = 6 / scale;
+      return _dashPolys(selContours, on, on, phase * (2 * on) / 4);
+    });
+  }
+
+  Future<void> _updateContour(ui.Image mask) async {
+    final al = _alphaOf[mask];
+    if (al == null) return;
+    try {
+      final polys = await compute(_contourIsolate, _ContourJob(al, docW, docH));
+      if (!identical(selMask, mask)) return;
+      final path = Path();
+      for (final p in polys) {
+        if (p.length < 4) continue;
+        path.moveTo(p[0], p[1]);
+        for (int i = 2; i + 1 < p.length; i += 2) {
+          path.lineTo(p[i], p[i + 1]);
+        }
+      }
+      selContours = polys;
+      selPath = path;
+      selPathMask = mask;
+      _dashCache.clear();
+      notifyListeners();
+    } catch (_) {}
+  }
   bool showZoom = false;
   Timer? _zoomTimer;
 
@@ -1843,21 +2122,25 @@ class EditorState extends ChangeNotifier {
   }
 
   // ---------- transform ----------
-  Offset xfToDoc(Offset local) =>
-      xfBounds.center + xfPos + _rot(Offset(local.dx * xfSx, local.dy * xfSy), xfRot);
+  Offset xfToDoc(Offset local) {
+    final px = local.dx * xfSx;
+    final py = local.dy * xfSy;
+    return xfBounds.center + xfPos + _rot(Offset(px + xfSkew * py, py), xfRot);
+  }
 
   Offset xfFromDoc(Offset d) {
     final q = _rot(d - xfBounds.center - xfPos, -xfRot);
     final sx = xfSx == 0 ? 1.0 : xfSx;
     final sy = xfSy == 0 ? 1.0 : xfSy;
-    return Offset(q.dx / sx, q.dy / sy);
+    return Offset((q.dx - xfSkew * q.dy) / sx, q.dy / sy);
   }
 
   List<Offset> xfHandleDocPoints() {
     final hw = xfBounds.width / 2;
     final hh = xfBounds.height / 2;
     final top = xfToDoc(Offset(0, -hh));
-    final rotP = top + _rot(Offset(0, -90 / scale), xfRot);
+    final skewP = top + _rot(Offset(0, -56 / scale), xfRot);
+    final rotP = top + _rot(Offset(0, -118 / scale), xfRot);
     return [
       xfToDoc(Offset(-hw, -hh)),
       xfToDoc(Offset(hw, -hh)),
@@ -1868,6 +2151,7 @@ class EditorState extends ChangeNotifier {
       xfToDoc(Offset(0, hh)),
       xfToDoc(Offset(-hw, 0)),
       rotP,
+      skewP,
     ];
   }
 
@@ -1917,6 +2201,9 @@ class EditorState extends ChangeNotifier {
         xfSx = 1;
         xfSy = 1;
         xfRot = 0;
+        xfSkew = 0;
+        xfExpanded = false;
+        xfNudge = false;
         xfActive = true;
         menu = null;
         toolMenuOpen = false;
@@ -1928,6 +2215,7 @@ class EditorState extends ChangeNotifier {
     final ctr = xfBounds.center;
     c.translate(ctr.dx + xfPos.dx, ctr.dy + xfPos.dy);
     c.rotate(xfRot);
+    c.skew(xfSkew, 0);
     c.scale(xfSx, xfSy);
     c.translate(-ctr.dx, -ctr.dy);
     c.drawImage(im, Offset.zero, Paint()..filterQuality = FilterQuality.high);
@@ -2000,6 +2288,8 @@ class EditorState extends ChangeNotifier {
     if (idx >= 0) {
       if (idx < 4) {
         _xfKind = 3;
+      } else if (idx == 9) {
+        _xfKind = 6;
       } else if (idx == 8) {
         _xfKind = 2;
       } else if (idx == 5 || idx == 7) {
@@ -2021,19 +2311,48 @@ class EditorState extends ChangeNotifier {
     final q = _rot(doc - c, -xfRot);
     final hw = math.max(1.0, xfBounds.width / 2);
     final hh = math.max(1.0, xfBounds.height / 2);
+    final sgx = xfSx < 0 ? -1.0 : 1.0;
+    final sgy = xfSy < 0 ? -1.0 : 1.0;
     if (_xfKind == 1) {
       xfPos = xfPos + (doc - _xfLast);
       _xfLast = doc;
+      if (xfSnap) {
+        final cc = xfBounds.center + xfPos;
+        final dc = Offset(docW / 2, docH / 2);
+        if ((cc.dx - dc.dx).abs() < 10 / scale) {
+          xfPos = Offset(dc.dx - xfBounds.center.dx, xfPos.dy);
+        }
+        if ((cc.dy - dc.dy).abs() < 10 / scale) {
+          xfPos = Offset(xfPos.dx, dc.dy - xfBounds.center.dy);
+        }
+      }
     } else if (_xfKind == 2) {
-      xfRot = math.atan2(doc.dy - c.dy, doc.dx - c.dx) + math.pi / 2;
+      var r = math.atan2(doc.dy - c.dy, doc.dx - c.dx) + math.pi / 2;
+      if (xfSnap) {
+        const step = math.pi / 12;
+        final n = (r / step).round() * step;
+        if ((r - n).abs() < 0.07) r = n;
+      }
+      xfRot = r;
     } else if (_xfKind == 3) {
-      final s = math.max(0.03, q.distance / math.sqrt(hw * hw + hh * hh));
-      xfSx = (xfSx < 0 ? -1 : 1) * s;
-      xfSy = (xfSy < 0 ? -1 : 1) * s;
+      if (xfLock) {
+        final s = math.max(0.03, q.distance / math.sqrt(hw * hw + hh * hh));
+        xfSx = sgx * s;
+        xfSy = sgy * s;
+      } else {
+        xfSx = sgx * math.max(0.03, q.dx.abs() / hw);
+        xfSy = sgy * math.max(0.03, q.dy.abs() / hh);
+      }
     } else if (_xfKind == 4) {
-      xfSx = (xfSx < 0 ? -1 : 1) * math.max(0.03, q.dx.abs() / hw);
+      final s = math.max(0.03, q.dx.abs() / hw);
+      xfSx = sgx * s;
+      if (xfLock) xfSy = sgy * s;
     } else if (_xfKind == 5) {
-      xfSy = (xfSy < 0 ? -1 : 1) * math.max(0.03, q.dy.abs() / hh);
+      final s = math.max(0.03, q.dy.abs() / hh);
+      xfSy = sgy * s;
+      if (xfLock) xfSx = sgx * s;
+    } else if (_xfKind == 6) {
+      if (q.dy.abs() > 8) xfSkew = math.max(-1.5, math.min(1.5, q.dx / q.dy));
     }
     notifyListeners();
   }
@@ -2266,6 +2585,9 @@ class EditorState extends ChangeNotifier {
         xfSx = 1;
         xfSy = 1;
         xfRot = 0;
+        xfSkew = 0;
+        xfExpanded = false;
+        xfNudge = false;
         xfActive = true;
       });
 
@@ -3354,6 +3676,12 @@ class EditorState extends ChangeNotifier {
         toast('Saved to Photos');
       });
 
+  Future<void> exportJpgToPhotos(int quality) => _guard('Exporting JPG...', () async {
+        final bytes = await exportJpg(quality);
+        await Gal.putImageBytes(bytes, album: 'PixelStudio');
+        toast('Saved JPG to Photos');
+      });
+
   Future<void> flattenImage() => _guard('Flattening...', () async {
         if (layers.length < 2) return;
         final img = await renderImage(docW, docH, (c) => paintDoc(c, preview: false));
@@ -3388,6 +3716,7 @@ class EditorState extends ChangeNotifier {
   void startGradient() {
     if (current == null) return;
     gradActive = true;
+    gradFade = false;
     gradRadial = false;
     gradC1 = color.withValues(alpha: 1);
     gradC2 = color.withValues(alpha: 0);
@@ -3525,6 +3854,7 @@ class EditorState extends ChangeNotifier {
   }
 
   void gradCancel() {
+    gradFade = false;
     gradActive = false;
     gradEditor = false;
     gradPresets = false;
@@ -3539,18 +3869,465 @@ class EditorState extends ChangeNotifier {
           return;
         }
         final old = l.image;
-        final comp = await renderImage(docW, docH, (c) {
-          c.drawImage(old, Offset.zero, Paint());
-          c.drawRect(_rect, gradPaint());
-        });
+        final ui.Image comp;
+        if (gradFade) {
+          comp = await renderImage(docW, docH, (c) {
+            c.saveLayer(_rect, Paint());
+            c.drawImage(old, Offset.zero, Paint());
+            c.drawRect(_rect, gradPaint()..blendMode = BlendMode.dstIn);
+            c.restore();
+          });
+        } else {
+          comp = await renderImage(docW, docH, (c) {
+            c.drawImage(old, Offset.zero, Paint());
+            c.drawRect(_rect, gradPaint());
+          });
+        }
         final res = await _masked(old, comp);
         _pushUndo();
         l.image = res;
+        gradFade = false;
         gradActive = false;
         gradEditor = false;
         gradPresets = false;
         gradPick = false;
       });
+
+  // ======================================================
+  // Batch 7: Fill & Stroke, Fade, Glow / Drop Shadow, transform extras
+  // ======================================================
+  // ---- generic eyedropper ----
+  int colorPickTarget = 0; // 0 none, 2 fx color, 3 fill color
+
+  void startPick(int target) {
+    colorPickTarget = colorPickTarget == target ? 0 : target;
+    if (colorPickTarget != 0) toast('Tap the image to pick a color');
+    notifyListeners();
+  }
+
+  Future<Color?> _sampleFlat(Offset doc) async {
+    final x = doc.dx.floor();
+    final y = doc.dy.floor();
+    if (x < 0 || y < 0 || x >= docW || y >= docH) return null;
+    _skipGrad = true;
+    final fut = renderImage(docW, docH, (c) => paintDoc(c, preview: false));
+    _skipGrad = false;
+    final img = await fut;
+    final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (bd == null) return null;
+    final d = bd.buffer.asUint8List();
+    final i = (y * docW + x) * 4;
+    final a = d[i + 3];
+    if (a == 0) return null;
+    final inv = 255.0 / a;
+    return Color.fromARGB(255, _c255(d[i] * inv), _c255(d[i + 1] * inv), _c255(d[i + 2] * inv));
+  }
+
+  Future<void> _pickGeneric(Offset doc) async {
+    final target = colorPickTarget;
+    colorPickTarget = 0;
+    final c = await _sampleFlat(doc);
+    if (c != null) {
+      if (target == 2) {
+        fxColor = c.withValues(alpha: fxColor.a);
+      } else if (target == 3) {
+        color = c;
+        _scheduleFill();
+      }
+    }
+    notifyListeners();
+  }
+
+  // ---- Glow / Drop shadow ----
+  bool fxActive = false;
+  bool fxShadow = true;
+  double fxBlur = 8;
+  double fxDistance = 4;
+  double fxAngle = 135;
+  double fxIntensity = 1;
+  Color fxColor = Colors.black;
+  bool fxColorOpen = false;
+
+  void startShadow(bool shadow) {
+    if (current == null) return;
+    fxActive = true;
+    fxShadow = shadow;
+    fxBlur = 8;
+    fxDistance = 4;
+    fxAngle = 135;
+    fxIntensity = 1;
+    fxColor = shadow ? Colors.black : color.withValues(alpha: 1);
+    fxColorOpen = false;
+    menu = null;
+    toolMenuOpen = false;
+    openGroup = null;
+    notifyListeners();
+  }
+
+  void fxSet({double? blur, double? distance, double? angle, double? intensity}) {
+    if (blur != null) fxBlur = blur;
+    if (distance != null) fxDistance = distance;
+    if (angle != null) fxAngle = angle;
+    if (intensity != null) fxIntensity = intensity;
+    notifyListeners();
+  }
+
+  void fxSetColor(Color c) {
+    fxColor = c;
+    notifyListeners();
+  }
+
+  void fxToggleColor() {
+    fxColorOpen = !fxColorOpen;
+    notifyListeners();
+  }
+
+  void fxCancel() {
+    fxActive = false;
+    fxColorOpen = false;
+    colorPickTarget = 0;
+    notifyListeners();
+  }
+
+  void _paintFx(Canvas c, ui.Image img) {
+    final rect = _rect;
+    final unit = math.max(1.0, docW / 540.0);
+    final a = fxAngle * math.pi / 180;
+    final off = fxShadow
+        ? Offset(math.cos(a) * fxDistance * unit, math.sin(a) * fxDistance * unit)
+        : Offset.zero;
+    final sigma = math.max(0.1, fxBlur * unit / 2);
+    final alpha = math.max(0.0, math.min(1.0, fxIntensity)) * fxColor.a;
+    final passes = fxShadow ? 1 : 2;
+    for (int i = 0; i < passes; i++) {
+      c.saveLayer(rect, Paint()..imageFilter = ui.ImageFilter.blur(sigmaX: sigma, sigmaY: sigma));
+      c.drawImage(
+        img,
+        off,
+        Paint()..colorFilter = ColorFilter.mode(fxColor.withValues(alpha: alpha), BlendMode.srcIn),
+      );
+      c.restore();
+    }
+    c.drawImage(img, Offset.zero, Paint());
+  }
+
+  Future<void> fxApply() => _guard('Applying...', () async {
+        final l = current;
+        if (l == null) {
+          fxActive = false;
+          return;
+        }
+        final old = l.image;
+        final neu = await renderImage(docW, docH, (c) => _paintFx(c, old));
+        final res = await _masked(old, neu);
+        _pushUndo();
+        l.image = res;
+        fxActive = false;
+        fxColorOpen = false;
+      });
+
+  // ---- Fade (reuses the gradient handles) ----
+  bool gradFade = false;
+
+  void startFade() {
+    if (current == null) return;
+    gradActive = true;
+    gradFade = true;
+    gradRadial = false;
+    gradC1 = Colors.white;
+    gradC2 = const Color(0x00FFFFFF);
+    gradStop = 0;
+    gradEditor = false;
+    gradPresets = true;
+    gradPick = false;
+    gradA = Offset(docW * 0.3, docH * 0.12);
+    gradB = Offset(docW * 0.7, docH * 0.88);
+    menu = null;
+    toolMenuOpen = false;
+    openGroup = null;
+    notifyListeners();
+  }
+
+  // ---- Fill & Stroke tool ----
+  bool fillActive = false;
+  int fillType = 0; // 0 fill, 1 stroke, 2 noise, 3 clouds
+  double fillOpacity = 1;
+  double fillWidth = 8;
+  double fillAmount = 0.5;
+  double fillScale = 120;
+  bool fillColorOpen = false;
+  ui.Image? fillPreview;
+  bool _fillBusy = false;
+  bool _fillDirty = false;
+  static const List<String> fillNames = ['Fill', 'Stroke', 'Noise', 'Clouds'];
+
+  void startFill() {
+    if (current == null) return;
+    fillActive = true;
+    fillType = 0;
+    fillColorOpen = false;
+    gradActive = false;
+    menu = null;
+    toolMenuOpen = false;
+    openGroup = null;
+    _scheduleFill();
+    notifyListeners();
+  }
+
+  void fillSetType(int t) {
+    fillType = t;
+    _scheduleFill();
+    notifyListeners();
+  }
+
+  void fillSet({double? opacity, double? width, double? amount, double? scale}) {
+    if (opacity != null) fillOpacity = opacity;
+    if (width != null) fillWidth = width;
+    if (amount != null) fillAmount = amount;
+    if (scale != null) fillScale = scale;
+    _scheduleFill();
+    notifyListeners();
+  }
+
+  void fillSetColor(Color c) {
+    color = c;
+    _scheduleFill();
+    notifyListeners();
+  }
+
+  void fillToggleColor() {
+    fillColorOpen = !fillColorOpen;
+    notifyListeners();
+  }
+
+  void fillCancel() {
+    fillActive = false;
+    fillColorOpen = false;
+    fillPreview = null;
+    colorPickTarget = 0;
+    notifyListeners();
+  }
+
+  void _scheduleFill() {
+    if (_fillBusy) {
+      _fillDirty = true;
+      return;
+    }
+    _runFill();
+  }
+
+  Future<void> _runFill() async {
+    _fillBusy = true;
+    try {
+      do {
+        _fillDirty = false;
+        final img = await _fillImage();
+        if (!fillActive) break;
+        fillPreview = img;
+        notifyListeners();
+      } while (_fillDirty && fillActive);
+    } catch (e) {
+      toast('Preview failed: $e');
+    }
+    _fillBusy = false;
+  }
+
+  Future<ui.Image> _clipToSel(ui.Image img) async {
+    final m = selMask;
+    if (m == null) return img;
+    return renderImage(docW, docH, (c) {
+      c.saveLayer(_rect, Paint());
+      c.drawImage(img, Offset.zero, Paint());
+      c.drawImage(m, Offset.zero, Paint()..blendMode = BlendMode.dstIn);
+      c.restore();
+    });
+  }
+
+  Future<ui.Image> _fillImage() async {
+    final col = color.withValues(alpha: math.max(0.0, math.min(1.0, fillOpacity)));
+    ui.Image raw;
+    switch (fillType) {
+      case 1:
+        return _strokeRing(col);
+      case 2:
+        raw = await _noiseImage();
+        break;
+      case 3:
+        raw = await _cloudsImage(col);
+        break;
+      default:
+        raw = await renderImage(docW, docH, (c) {
+          c.drawRect(_rect, Paint()..color = col);
+        });
+    }
+    return _clipToSel(raw);
+  }
+
+  Future<ui.Image> _strokeRing(Color col) async {
+    final base = selMask ??
+        await renderImage(docW, docH, (c) {
+          c.drawRect(_rect, Paint()..color = Colors.black);
+        });
+    final r = math.max(0.5, fillWidth / 2);
+    final outer = await renderImage(docW, docH, (c) {
+      c.saveLayer(_rect, Paint()..imageFilter = ui.ImageFilter.dilate(radiusX: r, radiusY: r));
+      c.drawImage(base, Offset.zero, Paint());
+      c.restore();
+    });
+    final inner = await renderImage(docW, docH, (c) {
+      c.saveLayer(_rect, Paint()..imageFilter = ui.ImageFilter.erode(radiusX: r, radiusY: r));
+      c.drawImage(base, Offset.zero, Paint());
+      c.restore();
+    });
+    return renderImage(docW, docH, (c) {
+      c.saveLayer(_rect, Paint());
+      c.drawImage(outer, Offset.zero, Paint());
+      c.drawImage(inner, Offset.zero, Paint()..blendMode = BlendMode.dstOut);
+      c.drawRect(_rect, Paint()
+        ..color = col
+        ..blendMode = BlendMode.srcIn);
+      c.restore();
+    });
+  }
+
+  Future<ui.Image> _noiseImage() async {
+    final w = docW;
+    final h = docH;
+    final rnd = math.Random(17);
+    final a = (math.max(0.0, math.min(1.0, fillOpacity * fillAmount)) * 255).round();
+    final px = Uint8List(w * h * 4);
+    for (int i = 0; i < w * h; i++) {
+      final pv = (rnd.nextInt(256) * a / 255).round();
+      final j = i * 4;
+      px[j] = pv;
+      px[j + 1] = pv;
+      px[j + 2] = pv;
+      px[j + 3] = a;
+    }
+    return imageFromRgba(px, w, h);
+  }
+
+  double _vnoise(double x, double y, int seed) {
+    final xi = x.floor();
+    final yi = y.floor();
+    final xf = x - xi;
+    final yf = y - yi;
+    final u = xf * xf * (3 - 2 * xf);
+    final v = yf * yf * (3 - 2 * yf);
+    final a = _hash(xi + seed * 57, yi);
+    final b = _hash(xi + 1 + seed * 57, yi);
+    final c = _hash(xi + seed * 57, yi + 1);
+    final d = _hash(xi + 1 + seed * 57, yi + 1);
+    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+  }
+
+  Future<ui.Image> _cloudsImage(Color col) async {
+    final w = math.max(1, docW ~/ 3);
+    final h = math.max(1, docH ~/ 3);
+    final sc = math.max(3.0, fillScale / 3);
+    final px = Uint8List(w * h * 4);
+    final cr = col.r * 255;
+    final cg = col.g * 255;
+    final cb = col.b * 255;
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        double v = 0, amp = 1, tot = 0, f = 1;
+        for (int o = 0; o < 5; o++) {
+          v += _vnoise(x / sc * f, y / sc * f, o) * amp;
+          tot += amp;
+          amp *= 0.5;
+          f *= 2;
+        }
+        v /= tot;
+        v = math.max(0.0, math.min(1.0, (v - 0.5) * 1.8 + 0.5));
+        final a = v * col.a;
+        final j = (y * w + x) * 4;
+        px[j] = (cr * a).round();
+        px[j + 1] = (cg * a).round();
+        px[j + 2] = (cb * a).round();
+        px[j + 3] = (a * 255).round();
+      }
+    }
+    final small = await imageFromRgba(px, w, h);
+    return renderImage(docW, docH, (c) {
+      c.drawImageRect(
+        small,
+        Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()),
+        _rect,
+        Paint()..filterQuality = FilterQuality.high,
+      );
+    });
+  }
+
+  Future<void> fillApply() => _guard('Applying...', () async {
+        final l = current;
+        final pv = fillPreview;
+        if (l == null || pv == null) {
+          fillActive = false;
+          return;
+        }
+        final old = l.image;
+        final res = await renderImage(docW, docH, (c) {
+          c.drawImage(old, Offset.zero, Paint());
+          c.drawImage(pv, Offset.zero, Paint());
+        });
+        _pushUndo();
+        l.image = res;
+        fillActive = false;
+        fillColorOpen = false;
+        fillPreview = null;
+      });
+
+  // ---- transform extras ----
+  bool xfLock = false;
+  bool xfSnap = false;
+  bool xfNudge = false;
+  bool xfExpanded = false;
+  double xfSkew = 0;
+
+  void xfToggleLock() {
+    xfLock = !xfLock;
+    notifyListeners();
+  }
+
+  void xfToggleSnap() {
+    xfSnap = !xfSnap;
+    notifyListeners();
+  }
+
+  void xfToggleNudge() {
+    xfNudge = !xfNudge;
+    notifyListeners();
+  }
+
+  void xfToggleExpand() {
+    xfExpanded = !xfExpanded;
+    notifyListeners();
+  }
+
+  void xfNudgeBy(Offset d) {
+    xfPos = xfPos + d;
+    notifyListeners();
+  }
+
+  void xfRotateBy(double rad) {
+    xfRot += rad;
+    notifyListeners();
+  }
+
+  void xfReset() {
+    xfPos = Offset.zero;
+    xfSx = 1;
+    xfSy = 1;
+    xfRot = 0;
+    xfSkew = 0;
+    notifyListeners();
+  }
+
+  void xfCenter() {
+    xfPos = Offset(docW / 2, docH / 2) - xfBounds.center;
+    notifyListeners();
+  }
 
   // ---------- view ----------
   Offset toDoc(Offset p) => (p - offset) / scale;
@@ -3931,6 +4708,21 @@ class DocPainter extends CustomPainter {
         _handle(canvas, pts[i], 11 / sc, Colors.white);
       }
       _handle(canvas, pts[8], 13 / sc, const Color(0xFF4DB3FF));
+      _handle(canvas, pts[9], 13 / sc, Colors.white);
+      final sp = pts[9];
+      final k = 1 / sc;
+      canvas.drawPath(
+        Path()
+          ..moveTo(sp.dx - 5 * k, sp.dy + 3.5 * k)
+          ..lineTo(sp.dx - 2 * k, sp.dy - 3.5 * k)
+          ..lineTo(sp.dx + 5 * k, sp.dy - 3.5 * k)
+          ..lineTo(sp.dx + 2 * k, sp.dy + 3.5 * k)
+          ..close(),
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.6 * k
+          ..color = Colors.black87,
+      );
     }
     if (s.cropActive) {
       final full = Path()..addRect(Rect.fromLTWH(0, 0, s.docW.toDouble(), s.docH.toDouble()));
@@ -3978,7 +4770,30 @@ class DocPainter extends CustomPainter {
     s.paintDoc(canvas, preview: true);
     final ei = s.selEdges;
     final edge = ei.isNotEmpty ? ei[s.antTick.value % ei.length] : s.selEdge;
-    if (s.selEdge != null && edge != null) {
+    final vec = s.scale > 2.5 &&
+        s.selMask != null &&
+        s.selPath != null &&
+        identical(s.selPathMask, s.selMask);
+    if (vec) {
+      final lw = 1.6 / s.scale;
+      canvas.drawPath(
+        s.selPath!,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = lw
+          ..strokeJoin = StrokeJoin.round
+          ..isAntiAlias = true
+          ..color = Colors.white,
+      );
+      canvas.drawPath(
+        s.selDashed(s.scale, s.antTick.value % 4),
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = lw
+          ..isAntiAlias = true
+          ..color = Colors.black,
+      );
+    } else if (s.selEdge != null && edge != null) {
       canvas.drawImage(edge, Offset.zero, Paint()..filterQuality = FilterQuality.none);
     }
     canvas.restore();
@@ -4542,6 +5357,11 @@ class GalleryPage extends StatelessWidget {
               onTap: () => Navigator.pop(c, 'export'),
             ),
             ListTile(
+              leading: const Icon(Icons.image_outlined),
+              title: Text('Export JPG to Photos', style: lbl(16)),
+              onTap: () => Navigator.pop(c, 'export_jpg'),
+            ),
+            ListTile(
               leading: const Icon(Icons.delete_outline),
               title: Text('Delete', style: lbl(16)),
               onTap: () => Navigator.pop(c, 'delete'),
@@ -4575,6 +5395,17 @@ class GalleryPage extends StatelessWidget {
         final bytes = await es.exportPng();
         await Gal.putImageBytes(bytes, album: 'PixelStudio');
         messenger.showSnackBar(const SnackBar(content: Text('Saved to Photos')));
+      } catch (e) {
+        messenger.showSnackBar(SnackBar(content: Text('Export failed: $e')));
+      }
+    } else if (act == 'export_jpg') {
+      final q = await askJpgQuality(context);
+      if (q == null) return;
+      try {
+        await es.openProject(p);
+        final bytes = await es.exportJpg(q);
+        await Gal.putImageBytes(bytes, album: 'PixelStudio');
+        messenger.showSnackBar(const SnackBar(content: Text('Saved JPG to Photos')));
       } catch (e) {
         messenger.showSnackBar(SnackBar(content: Text('Export failed: $e')));
       }
@@ -5291,6 +6122,44 @@ class _EditorPageState extends State<EditorPage> {
               bottom: dockBottom + kDockH + 8,
               child: const GradientEditorPanel(),
             ),
+          if (es.fxActive && es.fxColorOpen)
+            Positioned(
+              left: 10,
+              right: 10,
+              bottom: dockBottom + kDockH + 8,
+              child: ColorEditorPanel(
+                color: es.fxColor,
+                onChanged: es.fxSetColor,
+                picking: es.colorPickTarget == 2,
+                onPick: () => es.startPick(2),
+              ),
+            ),
+          if (es.fillActive && es.fillColorOpen)
+            Positioned(
+              left: 10,
+              right: 10,
+              bottom: dockBottom + kDockH + 8,
+              child: ColorEditorPanel(
+                color: es.color,
+                onChanged: es.fillSetColor,
+                picking: es.colorPickTarget == 3,
+                onPick: () => es.startPick(3),
+              ),
+            ),
+          if (es.xfActive && es.xfExpanded)
+            Positioned(
+              left: 10,
+              right: 10,
+              bottom: dockBottom + kDockH + 8,
+              child: const XfExtraPanel(),
+            ),
+          if (es.xfActive && es.xfNudge)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: dockBottom + kDockH + (es.xfExpanded ? 90 : 20),
+              child: const Center(child: NudgePad()),
+            ),
           Positioned(
             left: 10,
             right: 10,
@@ -5576,22 +6445,8 @@ class MenuLayer extends StatelessWidget {
             if (v != null) await es.applyDirBlur(v[0], v[1]);
           }),
           _pd(es, Icons.details, 'Sharpen', const [Param('Amount', 0.2, 3, 1), Param('Radius', 0.5, 6, 1.5)], (v) => es.applySharpen(v[0], v[1])),
-          _Item(Icons.layers, 'Drop Shadow', true, () async {
-            final v = await paramDialog(pc, 'Drop Shadow', [
-              const Param('Offset X', -80, 80, 16),
-              const Param('Offset Y', -80, 80, 16),
-              const Param('Blur', 0, 40, 10),
-              const Param('Opacity', 0.1, 1, 0.6),
-            ]);
-            if (v != null) await es.applyShadow(v[0], v[1], v[2], v[3], Colors.black);
-          }),
-          _Item(Icons.flare, 'Glow', true, () async {
-            final v = await paramDialog(pc, 'Glow', [
-              const Param('Blur', 2, 60, 18),
-              const Param('Opacity', 0.1, 1, 0.9),
-            ]);
-            if (v != null) await es.applyShadow(0, 0, v[0], v[1], es.color);
-          }),
+          _Item(Icons.layers, 'Drop Shadow', true, () => es.startShadow(true)),
+          _Item(Icons.flare, 'Glow', true, () => es.startShadow(false)),
           _pd(es, Icons.border_style, 'Bevel', const [Param('Depth', 0.5, 5, 2), Param('Size', 1, 12, 3)], (v) => es.applyBevel(v[0], v[1])),
           _pd(es, Icons.border_all, 'Edges', const [Param('Strength', 0.5, 6, 2)], (v) => es.applyEdges(v[0])),
           _Item(Icons.invert_colors_on, 'Tint', true, () async {
@@ -5658,9 +6513,9 @@ class MenuLayer extends StatelessWidget {
       _Item(Icons.text_fields, 'Text', true, () => textDialog(pc, es)),
       _Item(Icons.open_with, 'Transform', true, es.startTransform),
       _pd(es, Icons.grid_on, 'Warp', const [Param('Bulge / Pinch', -1, 1, 0.5), Param('Twirl', -3, 3, 0), Param('Radius', 0.2, 1, 0.6), Param('X', 0, 1, 0.5), Param('Y', 0, 1, 0.5)], (v) => es.applyWarp(v[0], v[1], v[2], v[3], v[4])),
-      _Item(Icons.format_color_fill, 'Fill & Stroke', true, es.fillSelection),
+      _Item(Icons.format_color_fill, 'Fill & Stroke', true, es.startFill),
       _Item(Icons.gradient, 'Gradient', true, es.startGradient),
-      _pd(es, Icons.blur_linear, 'Fade', const [Param('Angle', 0, 360, 90), Param('Start', 0, 0.95, 0.2), Param('End', 0.05, 1, 1)], (v) => es.applyFade(v[0], v[1], v[2])),
+      _Item(Icons.blur_linear, 'Fade', true, es.startFade),
       _Item(Icons.flare, 'Lens Flare', true, () async {
         final v = await paramDialog(pc, 'Lens Flare', [
           const Param('X', 0, 1, 0.7),
@@ -5674,6 +6529,10 @@ class MenuLayer extends StatelessWidget {
         if (b != null) await es.cameraFill(b);
       }),
       _Item(Icons.save_alt, 'Save to Photos', true, es.exportToPhotos),
+      _Item(Icons.image_outlined, 'Save JPG to Photos', true, () async {
+        final q = await askJpgQuality(pc);
+        if (q != null) await es.exportJpgToPhotos(q);
+      }),
     ];
   }
 
@@ -5922,6 +6781,15 @@ const List<_GradPreset> _gradPresets = [
   _GradPreset(Color(0xFFFFE08A), Color(0x00FFE08A), true),
 ];
 
+const List<_GradPreset> _fadePresets = [
+  _GradPreset(Color(0xFFFFFFFF), Color(0x00FFFFFF), false),
+  _GradPreset(Color(0x00FFFFFF), Color(0xFFFFFFFF), false),
+  _GradPreset(Color(0xFFFFFFFF), Color(0x00FFFFFF), true),
+  _GradPreset(Color(0x00FFFFFF), Color(0xFFFFFFFF), true),
+  _GradPreset(Color(0xFFFFFFFF), Color(0x66FFFFFF), false),
+  _GradPreset(Color(0x66FFFFFF), Color(0xFFFFFFFF), true),
+];
+
 Widget _gradSwatch(Color a, Color b, bool radial, double w, double h, {double radius = 12}) {
   return ClipRRect(
     borderRadius: BorderRadius.circular(radius),
@@ -5971,7 +6839,8 @@ class GradientDock extends StatelessWidget {
   }
 
   Widget _stop(EditorState es, int i) {
-    final c = i == 0 ? es.gradC1 : es.gradC2;
+    final c0 = i == 0 ? es.gradC1 : es.gradC2;
+    final c = es.gradFade ? const Color(0xFFE0494F).withValues(alpha: c0.a) : c0;
     final sel = es.gradStop == i && es.gradEditor;
     return Pressable(
       onTap: () => es.gradSelectStop(i),
@@ -5999,7 +6868,10 @@ class GradientDock extends StatelessWidget {
   Widget build(BuildContext context) {
     final es = context.watch<EditorState>();
     context.watch<AppTheme>();
-    final cur = _gradSwatch(es.gradC1, es.gradC2, es.gradRadial, 56, 44, radius: 10);
+    final fade = es.gradFade;
+    const red = Color(0xFFE0494F);
+    Color tone(Color c) => fade ? red.withValues(alpha: c.a) : c;
+    final cur = _gradSwatch(tone(es.gradC1), tone(es.gradC2), es.gradRadial, 56, 44, radius: 10);
 
     if (es.gradPresets) {
       return Container(
@@ -6037,12 +6909,12 @@ class GradientDock extends StatelessWidget {
                       ),
                     ),
                   ),
-                  for (final p in _gradPresets)
+                  for (final p in (fade ? _fadePresets : _gradPresets))
                     Padding(
                       padding: const EdgeInsets.only(right: 8),
                       child: Pressable(
                         onTap: () => es.gradPreset(p.a, p.b, p.radial),
-                        child: _gradSwatch(p.a, p.b, p.radial, 56, 44, radius: 10),
+                        child: _gradSwatch(tone(p.a), tone(p.b), p.radial, 56, 44, radius: 10),
                       ),
                     ),
                 ],
@@ -6083,7 +6955,7 @@ class GradientDock extends StatelessWidget {
                           Positioned.fill(
                             child: DecoratedBox(
                               decoration: BoxDecoration(
-                                gradient: LinearGradient(colors: [es.gradC1, es.gradC2]),
+                                gradient: LinearGradient(colors: [tone(es.gradC1), tone(es.gradC2)]),
                               ),
                             ),
                           ),
@@ -6277,7 +7149,9 @@ class GradientEditorPanel extends StatelessWidget {
         Color.fromARGB((al * 255).round(), rr, gg, bb);
 
     final rows = <Widget>[];
-    if (hsb) {
+    if (es.gradFade) {
+      // opacity only
+    } else if (hsb) {
       rows.addAll([
         _GSlider(
           label: 'Hue',
@@ -6395,16 +7269,19 @@ class GradientEditorPanel extends StatelessWidget {
         children: [
           Row(
             children: [
-              Text(es.gradStop == 0 ? 'Start color' : 'End color', style: lbl(14)),
+              Text(es.gradFade ? (es.gradStop == 0 ? 'Start opacity' : 'End opacity') : (es.gradStop == 0 ? 'Start color' : 'End color'), style: lbl(14)),
               const Spacer(),
-              modeBtn('HSB', hsb),
-              const SizedBox(width: 6),
-              modeBtn('RGB', !hsb),
+              if (!es.gradFade) ...[
+                modeBtn('HSB', hsb),
+                const SizedBox(width: 6),
+                modeBtn('RGB', !hsb),
+              ],
             ],
           ),
           const SizedBox(height: 8),
           ...rows,
           const SizedBox(height: 4),
+          if (!es.gradFade)
           Row(
             children: [
               swatch(c, checker: true, w: 78),
@@ -6435,8 +7312,757 @@ class GradientEditorPanel extends StatelessWidget {
 }
 
 // ============================================================
-// Tool column (left flyout)
+// Effect docks (Glow / Drop Shadow / Fill / Transform) + color editor
 // ============================================================
+Widget dockCircle(IconData icon, VoidCallback onTap, {bool primary = false, Color? iconColor}) {
+  return Pressable(
+    onTap: onTap,
+    child: Container(
+      width: 46,
+      height: 46,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: primary ? Pal.accent : Pal.fill,
+        border: Border.all(color: primary ? Colors.transparent : Pal.line),
+      ),
+      child: Icon(icon, size: 24, color: iconColor ?? (primary ? Pal.onAccent : Pal.txt)),
+    ),
+  );
+}
+
+class _MiniSliderPainter extends CustomPainter {
+  final double frac;
+  const _MiniSliderPainter(this.frac);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cy = size.height / 2;
+    const l = 7.0;
+    final r = size.width - 7;
+    final x = l + (r - l) * frac;
+    final base = Paint()
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round
+      ..color = Pal.dim;
+    final act = Paint()
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round
+      ..color = Pal.accent;
+    canvas.drawLine(Offset(l, cy), Offset(r, cy), base);
+    canvas.drawLine(Offset(l, cy), Offset(x, cy), act);
+    canvas.drawCircle(Offset(x, cy), 7, Paint()..color = Pal.txt);
+  }
+
+  @override
+  bool shouldRepaint(covariant _MiniSliderPainter old) => old.frac != frac;
+}
+
+class _SliderCell extends StatelessWidget {
+  final String label;
+  final String text;
+  final double value;
+  final double min;
+  final double max;
+  final ValueChanged<double> onChanged;
+  const _SliderCell({
+    required this.label,
+    required this.text,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final frac = max == min ? 0.0 : math.max(0.0, math.min(1.0, (value - min) / (max - min)));
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        SizedBox(height: 14, child: Text(text, style: lbl(11))),
+        const SizedBox(height: 2),
+        SizedBox(
+          height: 24,
+          child: LayoutBuilder(
+            builder: (c, box) {
+              double at(double dx) {
+                final t = math.max(0.0, math.min(1.0, (dx - 7) / math.max(1.0, box.maxWidth - 14)));
+                return min + (max - min) * t;
+              }
+
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onHorizontalDragStart: (d) => onChanged(at(d.localPosition.dx)),
+                onHorizontalDragUpdate: (d) => onChanged(at(d.localPosition.dx)),
+                onTapDown: (d) => onChanged(at(d.localPosition.dx)),
+                child: CustomPaint(
+                  size: Size(box.maxWidth, 24),
+                  painter: _MiniSliderPainter(frac),
+                ),
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          maxLines: 1,
+          style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: Pal.mut),
+        ),
+      ],
+    );
+  }
+}
+
+class _PlainCell extends StatelessWidget {
+  final Widget icon;
+  final String label;
+  final bool active;
+  const _PlainCell({required this.icon, required this.label, this.active = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.transparent,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const SizedBox(height: 16),
+          icon,
+          const SizedBox(height: 4),
+          Text(
+            label,
+            maxLines: 1,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w500,
+              color: active ? Pal.accent : Pal.mut,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Widget _colorCell(Color c, bool active, VoidCallback onTap) {
+  return Pressable(
+    onTap: onTap,
+    child: _PlainCell(
+      active: active,
+      label: 'Color',
+      icon: Container(
+        width: 24,
+        height: 24,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: active ? Pal.accent : Colors.white, width: 2.4),
+          boxShadow: const [BoxShadow(color: Color(0x66000000), blurRadius: 6)],
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          children: [
+            const Positioned.fill(child: CustomPaint(painter: _CheckerPainter(5))),
+            Positioned.fill(child: ColoredBox(color: c)),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class FxDock extends StatelessWidget {
+  final BuildContext pageContext;
+  const FxDock({super.key, required this.pageContext});
+
+  @override
+  Widget build(BuildContext context) {
+    final es = context.watch<EditorState>();
+    context.watch<AppTheme>();
+    final cells = <Widget>[
+      if (es.fxShadow)
+        Expanded(
+          child: _SliderCell(
+            label: 'Angle',
+            text: '${es.fxAngle.round()}\u00B0',
+            value: es.fxAngle,
+            min: 0,
+            max: 360,
+            onChanged: (v) => es.fxSet(angle: v),
+          ),
+        ),
+      Expanded(child: _colorCell(es.fxColor, es.fxColorOpen, es.fxToggleColor)),
+      Expanded(
+        child: _SliderCell(
+          label: 'Blur',
+          text: '${es.fxBlur.round()}',
+          value: es.fxBlur,
+          min: 0,
+          max: 60,
+          onChanged: (v) => es.fxSet(blur: v),
+        ),
+      ),
+      if (es.fxShadow)
+        Expanded(
+          child: _SliderCell(
+            label: 'Distance',
+            text: '${es.fxDistance.round()}',
+            value: es.fxDistance,
+            min: 0,
+            max: 100,
+            onChanged: (v) => es.fxSet(distance: v),
+          ),
+        ),
+      Expanded(
+        child: _SliderCell(
+          label: 'Intensity',
+          text: '${(es.fxIntensity * 100).round()}%',
+          value: es.fxIntensity,
+          min: 0,
+          max: 1,
+          onChanged: (v) => es.fxSet(intensity: v),
+        ),
+      ),
+    ];
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: surfaceDeco(radius: 26),
+      child: Row(
+        children: [
+          Expanded(child: Row(children: cells)),
+          const SizedBox(width: 6),
+          dockCircle(Icons.close, es.fxCancel, iconColor: const Color(0xFFFF6B6B)),
+          const SizedBox(width: 8),
+          dockCircle(Icons.check, es.fxApply, primary: true),
+        ],
+      ),
+    );
+  }
+}
+
+class FillDock extends StatelessWidget {
+  final BuildContext pageContext;
+  const FillDock({super.key, required this.pageContext});
+
+  @override
+  Widget build(BuildContext context) {
+    final es = context.watch<EditorState>();
+    context.watch<AppTheme>();
+    final t = es.fillType;
+    final cells = <Widget>[
+      Expanded(
+        child: PopupMenuButton<int>(
+          color: Pal.surface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          onSelected: (v) {
+            buzz();
+            es.fillSetType(v);
+          },
+          itemBuilder: (c) => [
+            for (int i = 0; i < EditorState.fillNames.length; i++)
+              PopupMenuItem<int>(
+                value: i,
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 26,
+                      child: t == i ? Icon(Icons.check, size: 20, color: Pal.accent) : null,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(EditorState.fillNames[i], style: lbl(15)),
+                  ],
+                ),
+              ),
+          ],
+          child: _PlainCell(icon: Icon(Icons.menu_open, size: 22, color: Pal.mut), label: 'Type'),
+        ),
+      ),
+      Expanded(child: _colorCell(es.color, es.fillColorOpen, es.fillToggleColor)),
+      Expanded(
+        child: _SliderCell(
+          label: 'Opacity',
+          text: '${(es.fillOpacity * 100).round()}%',
+          value: es.fillOpacity,
+          min: 0,
+          max: 1,
+          onChanged: (v) => es.fillSet(opacity: v),
+        ),
+      ),
+      if (t == 1)
+        Expanded(
+          child: _SliderCell(
+            label: 'Width',
+            text: '${es.fillWidth.round()}',
+            value: es.fillWidth,
+            min: 1,
+            max: 80,
+            onChanged: (v) => es.fillSet(width: v),
+          ),
+        ),
+      if (t == 2)
+        Expanded(
+          child: _SliderCell(
+            label: 'Amount',
+            text: '${(es.fillAmount * 100).round()}%',
+            value: es.fillAmount,
+            min: 0,
+            max: 1,
+            onChanged: (v) => es.fillSet(amount: v),
+          ),
+        ),
+      if (t == 3)
+        Expanded(
+          child: _SliderCell(
+            label: 'Scale',
+            text: '${es.fillScale.round()}',
+            value: es.fillScale,
+            min: 20,
+            max: 400,
+            onChanged: (v) => es.fillSet(scale: v),
+          ),
+        ),
+    ];
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: surfaceDeco(radius: 26),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 52,
+            child: Center(child: Text(EditorState.fillNames[t], style: lbl(13.5, color: Pal.mut))),
+          ),
+          Expanded(child: Row(children: cells)),
+          const SizedBox(width: 6),
+          dockCircle(Icons.close, es.fillCancel, iconColor: const Color(0xFFFF6B6B)),
+          const SizedBox(width: 8),
+          dockCircle(Icons.check, es.fillApply, primary: true),
+        ],
+      ),
+    );
+  }
+}
+
+class XfDock extends StatelessWidget {
+  final BuildContext pageContext;
+  const XfDock({super.key, required this.pageContext});
+
+  @override
+  Widget build(BuildContext context) {
+    final es = context.watch<EditorState>();
+    context.watch<AppTheme>();
+    PopupMenuItem<String> item(String v, IconData icon, String label, bool on) {
+      return PopupMenuItem<String>(
+        value: v,
+        child: Row(
+          children: [
+            Icon(icon, size: 22, color: on ? Pal.accent : Pal.txt),
+            const SizedBox(width: 12),
+            Expanded(child: Text(label, style: lbl(15, color: on ? Pal.accent : Pal.txt))),
+            if (on) Icon(Icons.check, size: 18, color: Pal.accent),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: surfaceDeco(radius: 26),
+      child: Row(
+        children: [
+          Pressable(
+            onTap: es.xfToggleExpand,
+            child: Container(
+              width: 44,
+              height: 56,
+              color: Colors.transparent,
+              child: AnimatedRotation(
+                turns: es.xfExpanded ? 0.5 : 0,
+                duration: const Duration(milliseconds: 220),
+                child: Icon(Icons.keyboard_arrow_up, size: 28, color: es.xfExpanded ? Pal.accent : Pal.txt),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Pressable(
+              onTap: es.xfFlipH,
+              child: _PlainCell(icon: Icon(Icons.flip, size: 22, color: Pal.mut), label: 'Flip-X'),
+            ),
+          ),
+          Expanded(
+            child: Pressable(
+              onTap: es.xfFlipV,
+              child: _PlainCell(icon: Icon(Icons.swap_vert, size: 22, color: Pal.mut), label: 'Flip-Y'),
+            ),
+          ),
+          Expanded(
+            child: PopupMenuButton<String>(
+              color: Pal.surface,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              onSelected: (v) {
+                buzz();
+                if (v == 'nudge') {
+                  es.xfToggleNudge();
+                } else if (v == 'lock') {
+                  es.xfToggleLock();
+                } else {
+                  es.xfToggleSnap();
+                }
+              },
+              itemBuilder: (c) => [
+                item('nudge', Icons.open_with, 'Pixel nudge', es.xfNudge),
+                item('lock', Icons.lock_outline, 'Lock aspect ratio', es.xfLock),
+                item('snap', Icons.grid_4x4, 'Snap', es.xfSnap),
+              ],
+              child: _PlainCell(
+                icon: Icon(Icons.menu_open, size: 22, color: Pal.mut),
+                label: 'Extras',
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          dockCircle(Icons.close, es.xfCancel, iconColor: const Color(0xFFFF6B6B)),
+          const SizedBox(width: 8),
+          dockCircle(Icons.check, es.xfApply, primary: true),
+        ],
+      ),
+    );
+  }
+}
+
+class XfExtraPanel extends StatelessWidget {
+  const XfExtraPanel({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final es = context.watch<EditorState>();
+    context.watch<AppTheme>();
+    Widget tile(IconData icon, String label, VoidCallback onTap) => Expanded(
+          child: Pressable(
+            onTap: onTap,
+            child: Container(
+              height: 64,
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              decoration: BoxDecoration(
+                color: Pal.fill,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, size: 24, color: Pal.txt),
+                  const SizedBox(height: 4),
+                  Text(label, style: TextStyle(fontSize: 10.5, color: Pal.mut, fontWeight: FontWeight.w500)),
+                ],
+              ),
+            ),
+          ),
+        );
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: surfaceDeco(radius: 22),
+      child: Row(
+        children: [
+          tile(Icons.rotate_left, 'Rotate -90', () => es.xfRotateBy(-math.pi / 2)),
+          tile(Icons.rotate_right, 'Rotate +90', () => es.xfRotateBy(math.pi / 2)),
+          tile(Icons.center_focus_strong_outlined, 'Center', es.xfCenter),
+          tile(Icons.restart_alt, 'Reset', es.xfReset),
+        ],
+      ),
+    );
+  }
+}
+
+class _NudgeBtn extends StatefulWidget {
+  final IconData icon;
+  final Offset step;
+  final EditorState es;
+  const _NudgeBtn({required this.icon, required this.step, required this.es});
+
+  @override
+  State<_NudgeBtn> createState() => _NudgeBtnState();
+}
+
+class _NudgeBtnState extends State<_NudgeBtn> {
+  Timer? _t;
+
+  void _stop() {
+    _t?.cancel();
+    _t = null;
+  }
+
+  @override
+  void dispose() {
+    _stop();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      onPointerDown: (_) {
+        widget.es.xfNudgeBy(widget.step);
+        _stop();
+        _t = Timer(const Duration(milliseconds: 350), () {
+          _t = Timer.periodic(const Duration(milliseconds: 60), (_) => widget.es.xfNudgeBy(widget.step));
+        });
+      },
+      onPointerUp: (_) => _stop(),
+      onPointerCancel: (_) => _stop(),
+      child: Container(
+        width: 50,
+        height: 50,
+        decoration: BoxDecoration(
+          color: Pal.surface,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Pal.line),
+          boxShadow: const [BoxShadow(color: Color(0x40000000), blurRadius: 12)],
+        ),
+        child: Icon(widget.icon, size: 26, color: Pal.txt),
+      ),
+    );
+  }
+}
+
+class NudgePad extends StatelessWidget {
+  const NudgePad({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final es = context.read<EditorState>();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _NudgeBtn(icon: Icons.keyboard_arrow_up, step: const Offset(0, -1), es: es),
+        const SizedBox(height: 6),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _NudgeBtn(icon: Icons.keyboard_arrow_left, step: const Offset(-1, 0), es: es),
+            const SizedBox(width: 56),
+            _NudgeBtn(icon: Icons.keyboard_arrow_right, step: const Offset(1, 0), es: es),
+          ],
+        ),
+        const SizedBox(height: 6),
+        _NudgeBtn(icon: Icons.keyboard_arrow_down, step: const Offset(0, 1), es: es),
+      ],
+    );
+  }
+}
+
+class ColorEditorPanel extends StatefulWidget {
+  final Color color;
+  final ValueChanged<Color> onChanged;
+  final bool picking;
+  final VoidCallback onPick;
+  final bool showOpacity;
+  const ColorEditorPanel({
+    super.key,
+    required this.color,
+    required this.onChanged,
+    required this.picking,
+    required this.onPick,
+    this.showOpacity = false,
+  });
+
+  @override
+  State<ColorEditorPanel> createState() => _ColorEditorPanelState();
+}
+
+class _ColorEditorPanelState extends State<ColorEditorPanel> {
+  bool _hsb = true;
+  late HSVColor _hsv;
+  Color? _last;
+
+  @override
+  void initState() {
+    super.initState();
+    _hsv = HSVColor.fromColor(widget.color);
+    _last = widget.color;
+  }
+
+  @override
+  void didUpdateWidget(covariant ColorEditorPanel old) {
+    super.didUpdateWidget(old);
+    if (widget.color != _last) {
+      _hsv = HSVColor.fromColor(widget.color);
+      _last = widget.color;
+    }
+  }
+
+  void _emitHsv(HSVColor h) {
+    _hsv = h;
+    final c = h.toColor();
+    _last = c;
+    widget.onChanged(c);
+  }
+
+  void _emitColor(Color c) {
+    _last = c;
+    _hsv = HSVColor.fromColor(c);
+    widget.onChanged(c);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.color;
+    final al = c.a;
+    final h = _hsv;
+    final r = (c.r * 255).round();
+    final g = (c.g * 255).round();
+    final b = (c.b * 255).round();
+    Color hsv(double hh, double s, double v) => HSVColor.fromAHSV(1, hh, s, v).toColor();
+
+    final rows = <Widget>[];
+    if (_hsb) {
+      rows.addAll([
+        _GSlider(
+          label: 'Hue',
+          text: '${h.hue.round()}\u00B0',
+          value: h.hue,
+          min: 0,
+          max: 359.9,
+          track: [for (int i = 0; i <= 6; i++) hsv(i * 60.0, 1, 1)],
+          onChanged: (v) => _emitHsv(HSVColor.fromAHSV(al, v, h.saturation, h.value)),
+        ),
+        _GSlider(
+          label: 'Saturation',
+          text: '${(h.saturation * 100).round()}%',
+          value: h.saturation,
+          min: 0,
+          max: 1,
+          track: [hsv(h.hue, 0, h.value), hsv(h.hue, 1, h.value)],
+          onChanged: (v) => _emitHsv(HSVColor.fromAHSV(al, h.hue, v, h.value)),
+        ),
+        _GSlider(
+          label: 'Brightness',
+          text: '${(h.value * 100).round()}%',
+          value: h.value,
+          min: 0,
+          max: 1,
+          track: [Colors.black, hsv(h.hue, h.saturation, 1)],
+          onChanged: (v) => _emitHsv(HSVColor.fromAHSV(al, h.hue, h.saturation, v)),
+        ),
+      ]);
+    } else {
+      rows.addAll([
+        _GSlider(
+          label: 'Red',
+          text: '$r',
+          value: r.toDouble(),
+          min: 0,
+          max: 255,
+          track: [Color.fromARGB(255, 0, g, b), Color.fromARGB(255, 255, g, b)],
+          onChanged: (v) => _emitColor(Color.fromARGB((al * 255).round(), v.round(), g, b)),
+        ),
+        _GSlider(
+          label: 'Green',
+          text: '$g',
+          value: g.toDouble(),
+          min: 0,
+          max: 255,
+          track: [Color.fromARGB(255, r, 0, b), Color.fromARGB(255, r, 255, b)],
+          onChanged: (v) => _emitColor(Color.fromARGB((al * 255).round(), r, v.round(), b)),
+        ),
+        _GSlider(
+          label: 'Blue',
+          text: '$b',
+          value: b.toDouble(),
+          min: 0,
+          max: 255,
+          track: [Color.fromARGB(255, r, g, 0), Color.fromARGB(255, r, g, 255)],
+          onChanged: (v) => _emitColor(Color.fromARGB((al * 255).round(), r, g, v.round())),
+        ),
+      ]);
+    }
+    if (widget.showOpacity) {
+      rows.add(
+        _GSlider(
+          label: 'Opacity',
+          text: '${(al * 100).round()}%',
+          value: al,
+          min: 0,
+          max: 1,
+          checker: true,
+          track: [c.withValues(alpha: 0), c.withValues(alpha: 1)],
+          onChanged: (v) => _emitColor(c.withValues(alpha: v)),
+        ),
+      );
+    }
+
+    Widget modeBtn(String t, bool on) => Pressable(
+          onTap: () => setState(() => _hsb = t == 'HSB'),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            width: 56,
+            height: 30,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: on ? Pal.accent : Pal.fill,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(t, style: lbl(12.5, color: on ? Pal.onAccent : Pal.mut)),
+          ),
+        );
+
+    Widget swatch(Color col, {VoidCallback? onTap, double w = 52}) => Pressable(
+          onTap: onTap,
+          child: Container(
+            width: w,
+            height: 38,
+            decoration: BoxDecoration(
+              color: col,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: Pal.line),
+            ),
+          ),
+        );
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+      decoration: surfaceDeco(radius: 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              const Spacer(),
+              modeBtn('HSB', _hsb),
+              const SizedBox(width: 6),
+              modeBtn('RGB', !_hsb),
+            ],
+          ),
+          const SizedBox(height: 6),
+          ...rows,
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              swatch(c.withValues(alpha: 1), w: 78),
+              const SizedBox(width: 10),
+              swatch(Colors.black, onTap: () => _emitColor(Colors.black.withValues(alpha: al))),
+              const SizedBox(width: 10),
+              swatch(Colors.white, onTap: () => _emitColor(Colors.white.withValues(alpha: al))),
+              const Spacer(),
+              Pressable(
+                onTap: widget.onPick,
+                child: Container(
+                  width: 46,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: widget.picking ? Pal.tint(0.25) : Pal.fill,
+                    borderRadius: BorderRadius.circular(11),
+                    border: Border.all(color: widget.picking ? Pal.accent : Pal.line),
+                  ),
+                  child: Icon(Icons.colorize, size: 22, color: widget.picking ? Pal.accent : Pal.txt),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class ToolColumn extends StatelessWidget {
   final double bottom;
   const ToolColumn({super.key, required this.bottom});
@@ -6901,6 +8527,7 @@ class BottomBar extends StatelessWidget {
             label: 'Continuous',
             onTap: es.toggleContiguous,
           ),
+          aa(),
         ];
       case Tool.colorSelect:
       case Tool.smartSel:
@@ -6949,6 +8576,8 @@ class BottomBar extends StatelessWidget {
     const sz = 22.0;
     final grey = Pal.mut;
 
+    if (es.fillActive) return FillDock(pageContext: pageContext);
+    if (es.fxActive) return FxDock(pageContext: pageContext);
     if (es.gradActive) return GradientDock(pageContext: pageContext);
 
     Widget bar(Widget left, Widget mid, Widget right) => Container(
@@ -6957,35 +8586,7 @@ class BottomBar extends StatelessWidget {
           child: Row(children: [left, const SizedBox(width: 4), Expanded(child: mid), const SizedBox(width: 4), right]),
         );
 
-    if (es.xfActive) {
-      return bar(
-        _sideBtn(const Icon(Icons.close, size: 26, color: Color(0xFFFF6B6B)), es.xfCancel),
-        Row(children: [
-          Expanded(
-            child: _Opt(
-              icon: Icon(Icons.flip, size: sz, color: grey),
-              label: 'Flip H',
-              onTap: es.xfFlipH,
-            ),
-          ),
-          Expanded(
-            child: _Opt(
-              icon: Icon(Icons.swap_vert, size: sz, color: grey),
-              label: 'Flip V',
-              onTap: es.xfFlipV,
-            ),
-          ),
-          Expanded(
-            child: _Opt(
-              icon: Icon(Icons.rotate_90_degrees_cw, size: sz, color: grey),
-              label: 'Rotate 90',
-              onTap: es.xfRotate90,
-            ),
-          ),
-        ]),
-        _sideBtn(Icon(Icons.check, size: 28, color: Pal.onAccent), es.xfApply, bg: Pal.accent, border: Colors.transparent),
-      );
-    }
+    if (es.xfActive) return XfDock(pageContext: pageContext);
 
     if (es.cropActive) {
       return bar(
