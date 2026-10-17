@@ -1301,6 +1301,8 @@ class EditorState extends ChangeNotifier {
   void paintDoc(Canvas c, {required bool preview}) =>
       paintLayers(c, layers, preview: preview);
 
+  FilterQuality dispQuality = FilterQuality.none;
+
   void paintLayers(Canvas c, List<DocLayer> ls, {required bool preview}) {
     final rect = _rect;
     final cur = current;
@@ -1311,38 +1313,38 @@ class EditorState extends ChangeNotifier {
         ..blendMode = l.blendMode;
       c.saveLayer(rect, p);
       if (xfActive && identical(l, cur) && xfBase != null && xfFloat != null) {
-        c.drawImage(xfBase!, Offset.zero, Paint());
+        c.drawImage(xfBase!, Offset.zero, Paint()..filterQuality = dispQuality);
         _drawXf(c, xfFloat!);
       } else if (fillActive && fillPreview != null && !_skipGrad && identical(l, cur)) {
-        c.drawImage(l.image, Offset.zero, Paint());
-        c.drawImage(fillPreview!, Offset.zero, Paint());
+        c.drawImage(l.image, Offset.zero, Paint()..filterQuality = dispQuality);
+        c.drawImage(fillPreview!, Offset.zero, Paint()..filterQuality = dispQuality);
       } else if (fxActive && !_skipGrad && identical(l, cur)) {
         _paintFx(c, l.image);
       } else if (gradActive && gradFade && !_skipGrad && identical(l, cur)) {
         if (selMask != null) {
           c.saveLayer(rect, Paint());
-          c.drawImage(l.image, Offset.zero, Paint());
-          c.drawImage(selMask!, Offset.zero, Paint()..blendMode = BlendMode.dstOut);
+          c.drawImage(l.image, Offset.zero, Paint()..filterQuality = dispQuality);
+          c.drawImage(selMask!, Offset.zero, Paint()..filterQuality = dispQuality..blendMode = BlendMode.dstOut);
           c.restore();
           c.saveLayer(rect, Paint()..blendMode = BlendMode.plus);
           c.saveLayer(rect, Paint());
-          c.drawImage(l.image, Offset.zero, Paint());
+          c.drawImage(l.image, Offset.zero, Paint()..filterQuality = dispQuality);
           c.drawRect(rect, gradPaint()..blendMode = BlendMode.dstIn);
           c.restore();
-          c.drawImage(selMask!, Offset.zero, Paint()..blendMode = BlendMode.dstIn);
+          c.drawImage(selMask!, Offset.zero, Paint()..filterQuality = dispQuality..blendMode = BlendMode.dstIn);
           c.restore();
         } else {
           c.saveLayer(rect, Paint());
-          c.drawImage(l.image, Offset.zero, Paint());
+          c.drawImage(l.image, Offset.zero, Paint()..filterQuality = dispQuality);
           c.drawRect(rect, gradPaint()..blendMode = BlendMode.dstIn);
           c.restore();
         }
       } else if (gradActive && !_skipGrad && identical(l, cur)) {
-        c.drawImage(l.image, Offset.zero, Paint());
+        c.drawImage(l.image, Offset.zero, Paint()..filterQuality = dispQuality);
         if (selMask != null) {
           c.saveLayer(rect, Paint());
           c.drawRect(rect, gradPaint());
-          c.drawImage(selMask!, Offset.zero, Paint()..blendMode = BlendMode.dstIn);
+          c.drawImage(selMask!, Offset.zero, Paint()..filterQuality = dispQuality..blendMode = BlendMode.dstIn);
           c.restore();
         } else {
           c.drawRect(rect, gradPaint());
@@ -1356,10 +1358,10 @@ class EditorState extends ChangeNotifier {
             ..colorFilter = pm == null ? null : ColorFilter.matrix(pm)
             ..imageFilter = pb == null ? null : ui.ImageFilter.blur(sigmaX: pb, sigmaY: pb),
         );
-        c.drawImage(l.image, Offset.zero, Paint());
+        c.drawImage(l.image, Offset.zero, Paint()..filterQuality = dispQuality);
         c.restore();
       } else {
-        c.drawImage(l.image, Offset.zero, Paint());
+        c.drawImage(l.image, Offset.zero, Paint()..filterQuality = dispQuality);
       }
       if (preview &&
           identical(l, cur) &&
@@ -1371,14 +1373,14 @@ class EditorState extends ChangeNotifier {
         if (selMask != null && !erase) {
           c.saveLayer(rect, Paint());
           paintStroke(c, stroke, color, brushSize, _op, _soft, false);
-          c.drawImage(selMask!, Offset.zero, Paint()..blendMode = BlendMode.dstIn);
+          c.drawImage(selMask!, Offset.zero, Paint()..filterQuality = dispQuality..blendMode = BlendMode.dstIn);
           c.restore();
         } else {
           paintStroke(c, stroke, color, brushSize, _op, _soft, erase);
         }
       }
       if (l.mask != null) {
-        c.drawImage(l.mask!, Offset.zero, Paint()..blendMode = BlendMode.dstIn);
+        c.drawImage(l.mask!, Offset.zero, Paint()..filterQuality = dispQuality..blendMode = BlendMode.dstIn);
       }
       c.restore();
     }
@@ -4004,11 +4006,13 @@ class EditorState extends ChangeNotifier {
       c.drawImage(
         img,
         off,
-        Paint()..colorFilter = ColorFilter.mode(fxColor.withValues(alpha: alpha), BlendMode.srcIn),
+        Paint()
+          ..filterQuality = dispQuality
+          ..colorFilter = ColorFilter.mode(fxColor.withValues(alpha: alpha), BlendMode.srcIn),
       );
       c.restore();
     }
-    c.drawImage(img, Offset.zero, Paint());
+    c.drawImage(img, Offset.zero, Paint()..filterQuality = dispQuality);
   }
 
   Future<void> fxApply() => _guard('Applying...', () async {
@@ -4767,7 +4771,9 @@ class DocPainter extends CustomPainter {
     canvas.drawRect(rect, Paint()..color = const Color(0xFFFFFFFF));
     canvas.drawPath(
         _checkerPath(s.docW, s.docH), Paint()..color = const Color(0xFFD9D9D9));
+    s.dispQuality = s.scale >= 1 ? FilterQuality.high : FilterQuality.medium;
     s.paintDoc(canvas, preview: true);
+    s.dispQuality = FilterQuality.none;
     final ei = s.selEdges;
     final edge = ei.isNotEmpty ? ei[s.antTick.value % ei.length] : s.selEdge;
     final vec = s.scale > 2.5 &&
